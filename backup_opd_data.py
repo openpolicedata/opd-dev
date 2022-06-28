@@ -11,7 +11,6 @@ else:
     output_dir = os.path.join("..","data","backup")
 import openpolicedata as opd
 from datetime import datetime
-import subprocess
 
 istart = 0
 datasets = opd._datasets.datasets_query()
