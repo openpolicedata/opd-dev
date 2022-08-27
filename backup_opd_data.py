@@ -22,9 +22,9 @@ include_stanford = False
 src_file = "..\opd-data\opd_source_table.csv"
 
 if src_file != None:
-    opd._datasets.datasets = opd._datasets._build(src_file)
+    opd.datasets.datasets = opd.datasets._build(src_file)
 
-datasets = opd.datasets_query()
+datasets = opd.query()
 
 print(f"Output directory: {output_dir}")
 log_filename = f"DataBackup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
