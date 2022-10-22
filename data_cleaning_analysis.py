@@ -11,14 +11,18 @@ else:
     output_dir = os.path.join("..","data","backup")
 import openpolicedata as opd
 
+csvfile = r"..\opd-data\opd_source_table.csv"
 run_all = True
 run_all_years = True
 run_all_agencies = True
 log_result = True
 if log_result:
     from openpyxl import Workbook, load_workbook
-skip_sources = [("California","STOPS"),("Fayetteville", "ALL"),("Los Angeles County", "ALL")]
-istart = 323
+skip_sources = [("Fayetteville", "ALL"), ("California", opd.defs.TableType.STOPS)]
+istart = 231
+
+if csvfile != None:
+    opd.datasets.datasets = opd.datasets._build(csvfile)
 datasets = opd.datasets.query()
 if run_all:
     max_num_stanford = float("inf")
