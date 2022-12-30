@@ -16,15 +16,15 @@ else:
 import openpolicedata as opd
 from datetime import datetime
 
-istart = 243
-update = "changes"
+istart = 510
+update = None #"changes"
 include_stanford = False
 src_file = "..\opd-data\opd_source_table.csv"
 
 if src_file != None:
     opd.datasets.datasets = opd.datasets._build(src_file)
 
-datasets = opd.query()
+datasets = opd.datasets.query()
 
 print(f"Output directory: {output_dir}")
 log_filename = f"DataBackup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
@@ -151,7 +151,7 @@ for i in range(istart, len(datasets)):
 
     src = opd.Source(srcName, state=state)
 
-    if datasets.iloc[i]["DataType"] ==opd.defs.DataType.CSV.value or \
+    if datasets.iloc[i]["DataType"] in [opd.defs.DataType.CSV.value, opd.defs.DataType.EXCEL.value] or \
         datasets.iloc[i]["Year"] != opd.defs.MULTI:
         csv_filename = src.get_csv_filename(datasets.iloc[i]["Year"], output_dir, datasets.iloc[i]["TableType"])
         zipname = csv_filename.replace(".csv",".zip")
