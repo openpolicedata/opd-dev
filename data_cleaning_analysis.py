@@ -1,6 +1,9 @@
+import copy
 import os
+import pickle
 import sys
 from datetime import date
+import logging
 import pandas as pd
 from datetime import datetime
 if os.path.basename(os.getcwd()) == "openpolicedata":
@@ -11,158 +14,150 @@ else:
     output_dir = os.path.join("..","data","backup")
 import openpolicedata as opd
 
+backup_dir = output_dir
+output_dir = os.path.join(output_dir, 'standardization')
+
+if not os.path.exists(output_dir):
+    raise FileNotFoundError(f"Output directory {output_dir} does not exist")
+
+istart = 819
+
+csvfile = None
 csvfile = r"..\opd-data\opd_source_table.csv"
-run_all = True
+run_all_stanford = False
 run_all_years = True
-run_all_agencies = True
-log_result = True
-if log_result:
-    from openpyxl import Workbook, load_workbook
-skip_sources = [("Fayetteville", "ALL"), ("California", opd.defs.TableType.STOPS)]
-istart = 231
+run_all_agencies = True  # Run all agencies for multi-agency cases
+verbose = False
+allowed_updates = []
+
+skip_sources = [("Norristown", "USE OF FORCE", 2017)]
+logger = logging.getLogger("opd")
+sh = logging.StreamHandler()
+fh = logging.FileHandler(os.path.join(output_dir, f'std_log_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'))
+format = logging.Formatter("%(asctime)s :: %(message)s", '%y-%m-%d %H:%M:%S') 
+sh.setFormatter(format)
+fh.setFormatter(format)
+fh.setLevel(logging.DEBUG)
+sh.setLevel(logging.INFO)
+
+logger.addHandler(fh)
+logger.addHandler(sh)
+logger.setLevel(logging.DEBUG)
 
 if csvfile != None:
     opd.datasets.datasets = opd.datasets._build(csvfile)
 datasets = opd.datasets.query()
-if run_all:
+if run_all_stanford:
     max_num_stanford = float("inf")
 else:
-    max_num_stanford = 1
+    max_num_stanford = 20
 
-xl_dir = os.path.join(output_dir, "standardization")
-if not os.path.exists(xl_dir):
-    os.mkdir(xl_dir)
-
-def autoset_width(worksheet):
-    for col in worksheet.columns:
-        max_length = 0
-        column = col[0].column_letter # Get the column name
-        for cell in col:
-            try: # Necessary to avoid error on empty cells
-                if len(str(cell.value)) > max_length:
-                    max_length = len(str(cell.value))
-            except:
-                pass
-        adjusted_width = (max_length + 2) * 1.2
-        worksheet.column_dimensions[column].width = adjusted_width
-
-def log_to_excel(table, year):
-    table_name = table.table_type.value.replace("/","-")
-    xl_filename = os.path.join(xl_dir,f"{table.state}_{table.source_name}_{table.agency}_{table_name}.xlsx")
-    if os.path.exists(xl_filename):
-        wb = load_workbook(xl_filename)
-    else:
-        wb = Workbook()
-        
-    cols = [x for x in table.table.columns if not x.startswith("RAW_")]
-    mat = []
-    for x in cols:
-        loc = [k for k in range(len(table.clean_hist)) if x == table.clean_hist[k].new_column_name]
-        if len(loc)==0:
-            mat.append([x,None])
-        elif len(loc)>1:
-            raise ValueError("This should not happen")
+prev_columns = []
+prev_maps = {}
+def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, year):
+    pkl_filename = os.path.join(output_dir, os.path.basename(csv_filename).replace(".csv",".pkl"))
+    if os.path.exists(pkl_filename):
+        old_data_maps = pickle.load(open(pkl_filename, "rb"))
+        if data_maps==old_data_maps:
+            return
+        elif any(x[0]==source_name and (len(x)<2 or x[1]==table_type) and (len(x)<3 or year in x[2]) for x in allowed_updates):
+            pass
         else:
-            map = table.clean_hist[loc[0]]
-            if type(map.old_column_name) == str:
-                mat.append([map.old_column_name,x])
-            else:
-                for name in map.old_column_name:
-                    mat.append([name,x])
-    
-    sheets = wb.sheetnames
-    if sheets == ["Sheet"]:
-        # Default val. Rename sheet.
-        wb["Sheet"].title = "Columns"
-
-    ws = wb["Columns"]
-    if ws.cell(row = 1, column = 1).value == None:
-        update = True
-        year_range = str(year)
-        col = 1
-    else:
-        col = 1
-        while ws.cell(row = 1, column = col).value != None:
-            col+=2
-        col-=2
-        mat_old = []
-        row = 3
-        while ws.cell(row = row, column = col).value != None:
-            if ws.cell(row = row, column = col+1).value==None:
-                mat_old.append([ws.cell(row = row, column = col).value,None])
-            else:
-                mat_old.append([ws.cell(row = row, column = col).value,ws.cell(row = row, column = col+1).value])
-            row+=1
-
-        update = mat != mat_old
-        if update:
-            year_range = str(year)
-            col+=2
-        else:
-            if "-" in ws.cell(row = 1, column = col).value:
-                year_range = [int(x) for x in ws.cell(row = 1, column = col).value.split("-")]
-            else:
-                year_range = int(ws.cell(row = 1, column = col).value)
-                year_range = [year_range,year_range]
-            if year == year_range[0]-1:
-                year_range[0]-=1
-            else:
-                year_range[0] = year
-
-            year_range = f"{year_range[0]}-{year_range[1]}"
-    ws.cell(row = 1, column = col).value = str(year_range)
-
-    if update:
-        ws.cell(row = 2, column = col).value = "Original"
-        ws.cell(row = 2, column = col+1).value = "Cleaned"
-        row = 2
-
-        for k,row in enumerate(mat):
-            ws.cell(row = 3+k, column = col).value = row[0]
-            if row[1] != None:
-                ws.cell(row = 3+k, column = col+1).value = row[1]
-
-        autoset_width(ws)
-
-    for map in table.clean_hist:
-        if type(map.new_column_name) == str:
-            if map.new_column_name not in wb.sheetnames:
-                wb.create_sheet(map.new_column_name)
-            ws_map = wb[map.new_column_name]
-            col = 1
-            while ws_map.cell(row = 1, column = col).value != None:
-                col+=2
-            ws_map.cell(row = 1, column = col).value = str(year)
-            row = 2
-            if map.data_maps != None:
-                if type(map.data_maps)==dict:
-                    for x,y in map.data_maps.items():
-                        ws_map.cell(row = row, column = col).value = x
-                        ws_map.cell(row = row, column = col+1).value = y
-                        row+=1
+            logger.info("Data maps do not match")
+            j=k=0
+            while j < len(old_data_maps) and k < len(data_maps):
+                if old_data_maps[j]==data_maps[k]:
+                    k+=1
+                    j+=1
+                    continue
+                if old_data_maps[j].new_column_name == data_maps[k].new_column_name:
+                    logger.info("Unequal column data")
+                    logger.info("Old data map")
+                    logger.info(old_data_maps[j])
+                    logger.info("\nNew data map: ")
+                    logger.info(data_maps[k])
+                    k+=1
+                    j+=1
                 else:
-                    for m in map.data_maps:
-                        for x,y in m.items():
-                            ws_map.cell(row = row, column = col).value = x
-                            ws_map.cell(row = row, column = col+1).value = y
-                            row+=1
+                    is_equal1 = [x for x in data_maps[k+1:] if x==old_data_maps[j]]
+                    if len(is_equal1)==0:
+                        logger.info("Unmatched old column: ")
+                        logger.info(old_data_maps[j])
+                        j+=1
 
-            counts = table.table[map.new_column_name].value_counts()
-            for k in range(min(10,len(counts))):
-                ws_map.cell(row = row+k, column = col).value = str(counts.index[k])
-                ws_map.cell(row = row+k, column = col+1).value = counts.iloc[k]
+                    is_equal2 = [x for x in old_data_maps[j:] if x==data_maps[k]]
+                    if len(is_equal2)==0:
+                        if len(is_equal1)==0:
+                            raise NotImplementedError()
+                        logger.info("Unmatched new column: ")
+                        logger.info(data_maps[k])
+                        k+=1
 
-            autoset_width(ws_map)
-        else:
-            raise TypeError(f"Unknown type for new column name {map.new_column_name}")
+            for j in range(j, len(old_data_maps)):
+                logger.info("Unmatched old column:")
+                logger.info(old_data_maps[j])
+            for k in range(k, len(data_maps)):
+                logger.info("Unmatched new column:")
+                logger.info(data_maps[k]) 
 
-    wb.save(xl_filename)
+            raise_error = True
+            if raise_error:
+                raise ValueError(f"Check {pkl_filename}!")
+    
+    logger.debug(f"Original columns:\n{orig_columns}")
+    
+    # Skip if shown before
+    same_table = prev_columns[0]==source_name and prev_columns[1]==table_type if len(prev_columns)>0 else False
+    all_orig = [map.orig_column_name for map in data_maps]
+    all_new = [map.new_column_name for map in data_maps]
+    if not same_table or \
+        all_orig!=prev_columns[2] or all_new!=prev_columns[3]:
+        msg = "Identified columns:\n"
+        for map in data_maps:
+            msg+=f"\t{map.orig_column_name}: {map.new_column_name}\n"
+
+        [prev_columns.pop() for _ in range(len(prev_columns))]
+        prev_columns.append(source_name)
+        prev_columns.append(table_type)
+        prev_columns.append(all_orig)
+        prev_columns.append(all_new)
+        prev_columns.append(dict())
+    
+        logger.debug(msg)
+    else:
+        logger.debug("Same column mapping as previously run case\n")
+
+    msg = "Data Maps:\n"
+    for map in data_maps:
+        # if same_table and map.data_maps is not None:
+        if map.data_maps is not None:
+            if map.orig_column_name not in prev_columns[-1]:
+                prev_columns[-1][map.orig_column_name] = dict()
+            map_copy = copy.deepcopy(map)
+            for k,v in map.data_maps.items():
+                if k in prev_columns[-1][map.orig_column_name]:
+                    if prev_columns[-1][map.orig_column_name][k] != v:
+                        raise ValueError(f"Value of {k} in column {map.orig_column_name} expected to map to {prev_columns[-1][map.orig_column_name][k]} but actually maps to {v}")
+                    map_copy.data_maps.pop(k)
+                else:
+                    prev_columns[-1][map.orig_column_name][k] = v
+            map = map_copy
+                    
+        msg+=f"{map}\n\n"
+
+    logger.debug(msg)
+
+    logger.debug("----------------------------------------------------------------------------")
+    logger.debug("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+    logger.debug("----------------------------------------------------------------------------")
+
+    pickle.dump(data_maps, open(pkl_filename, "wb"))
+
 
 num_stanford = 0
 prev_sources = []
 prev_tables = []
 prev_states = []
-output_dir = ".\\data"
 move_to_end = []
 has_issue = datasets["SourceName"].apply(lambda x : x in move_to_end)
 no_issue = datasets["SourceName"].apply(lambda x : x not in move_to_end)
@@ -170,8 +165,12 @@ datasets = pd.concat([datasets[no_issue], datasets[has_issue]])
 for i in range(istart, len(datasets)):
     if "stanford.edu" in datasets.iloc[i]["URL"]:
         num_stanford += 1
-        if num_stanford > max_num_stanford:
+        if num_stanford > max_num_stanford or datasets.iloc[i]["SourceName"]==datasets.iloc[i]["State"] or \
+            datasets.iloc[i]["SourceName"]=="State Patrol":
             continue
+
+    if datasets.iloc[i]["TableType"].lower() in opd.preproc._skip_tables:
+        continue
 
     srcName = datasets.iloc[i]["SourceName"]
     state = datasets.iloc[i]["State"]
@@ -188,7 +187,7 @@ for i in range(istart, len(datasets)):
             datasets.iloc[i]["State"] == prev_states[k]:
             skip = True
 
-    if skip or any([x==srcName and (y==datasets.iloc[i]["TableType"] or y=="ALL") for x,y in skip_sources]):
+    if skip or any([x==srcName and (y==datasets.iloc[i]["TableType"] or y=="ALL") and z=="ALL" for x,y,z in skip_sources]):
         continue
 
     prev_sources.append(srcName)
@@ -197,7 +196,7 @@ for i in range(istart, len(datasets)):
 
     table_print = datasets.iloc[i]["TableType"]
     now = datetime.now().strftime("%d.%b %Y %H:%M:%S")
-    print(f"{now} Running dataset {i} of {len(datasets)}: {srcName} {table_print} table")
+    logger.info(f"{now} Running index {i} of {len(datasets)}: {srcName} {table_print} table")
 
     src = opd.Source(srcName, state=state)
 
@@ -208,14 +207,24 @@ for i in range(istart, len(datasets)):
         years = src.get_years(datasets.iloc[i]["TableType"])
         years.sort(reverse=True)
         load_by_year = True
-    except:
+    except Exception as e:
+        if datasets.iloc[i]["DataType"] not in ["CSV", "Excel"]:
+            raise
+        load_by_year = False
+
+    if ".zip" in datasets.iloc[i]["URL"]:
         load_by_year = False
 
     if load_by_year:
         for y in years:
+            if any([x==srcName and (t==datasets.iloc[i]["TableType"] or t=="ALL") and (z==y or z=="ALL") for x,t,z in skip_sources]):
+                logger.info(f"Skipping year {y}")
+                continue
+            logger.info(f"Year: {y}")
             try:
-                csv_filename = src.get_csv_filename(y, output_dir, datasets.iloc[i]["TableType"], 
+                csv_filename = src.get_csv_filename(y, backup_dir, datasets.iloc[i]["TableType"], 
                     agency=agency)
+                zip_filename = csv_filename.replace(".csv",".zip")
             except ValueError as e:
                 if "There are no sources matching tableType" in e.args[0]:
                     continue
@@ -224,57 +233,46 @@ for i in range(istart, len(datasets)):
             except:
                 raise
             
-            if os.path.exists(csv_filename):
+            if os.path.exists(zip_filename) or os.path.exists(csv_filename):
+                is_zip = os.path.exists(zip_filename)
                 table = src.load_from_csv(y, table_type=datasets.iloc[i]["TableType"], 
-                    agency=agency,output_dir=output_dir)
+                    agency=agency,output_dir=backup_dir, zip=is_zip)
             elif run_all_years:
-                backup_dir = os.path.join(output_dir, "backup")
-                csv_filename = src.get_csv_filename(y, "", datasets.iloc[i]["TableType"], agency=agency)
-                zip_filename = csv_filename.replace(".csv",".zip")
-                if not os.path.exists(os.path.join(backup_dir,zip_filename)):
-                    # raise FileNotFoundError(f"Backup cannot be found for file {zip_filename}")
-                    table = src.load_from_url(y, table_type=datasets.iloc[i]["TableType"], 
+                table = src.load_from_url(y, table_type=datasets.iloc[i]["TableType"], 
                         agency=agency)
-                else:
-                    table = src.load_from_csv(y, table_type=datasets.iloc[i]["TableType"], 
-                        agency=agency,output_dir=backup_dir, filename=zip_filename)
-                print(f"\t{y} successfully read")
+                if table.table is None:
+                    continue
+                table.to_csv(output_dir=backup_dir)
             else:
                 continue
             
-            table.clean(keep_raw=True)
-            table.merge_date_and_time(ifmissing="ignore")
+            orig_columns = table.table.columns
+            table.standardize(race_cats= opd.defs.get_race_cats(expand=True), agg_race_cat=True, verbose=verbose, no_id="test")
 
-            if log_result:
-                log_to_excel(table, y)
+            if table.is_std:
+                log_to_json(orig_columns, table.get_transform_map(), csv_filename, 
+                            datasets.iloc[i]["SourceName"], datasets.iloc[i]["TableType"], y)
                     
             if not run_all_years:
                 break
     else:
-        csv_filename = src.get_csv_filename(datasets.iloc[i]["Year"], output_dir, datasets.iloc[i]["TableType"], 
+        csv_filename = src.get_csv_filename(datasets.iloc[i]["Year"], backup_dir, datasets.iloc[i]["TableType"], 
                     agency=agency)
-        if os.path.exists(csv_filename):
+        zip_filename = csv_filename.replace(".csv",".zip")
+        if os.path.exists(csv_filename) or os.path.exists(zip_filename):
+            is_zip = os.path.exists(zip_filename)
             table = src.load_from_csv(datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
-                agency=agency,output_dir=output_dir)
-        elif run_all:
-            backup_dir = os.path.join(output_dir, "backup")
-            csv_filename = src.get_csv_filename(datasets.iloc[i]["Year"], "", datasets.iloc[i]["TableType"], agency=agency)
-            zip_filename = csv_filename.replace(".csv",".zip")
-            if not os.path.exists(os.path.join(backup_dir,zip_filename)):
-                # raise FileNotFoundError(f"Backup cannot be found for file {zip_filename}")
-                table = src.load_from_url(datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
-                    agency=agency)
-            else:
-                table = src.load_from_csv(datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
-                    agency=agency,output_dir=backup_dir, filename=zip_filename)
+                agency=agency,output_dir=backup_dir, zip=is_zip)
         else:
-            raise FileNotFoundError(f"File {csv_filename} not found")
+            table = src.load_from_url(datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
+                    agency=agency)
+            table.to_csv(output_dir=backup_dir)
 
-        table.clean(keep_raw=True)
-        table.merge_date_and_time(ifmissing="ignore")
+        orig_columns = table.table.columns
+        table.standardize(race_cats= opd.defs.get_race_cats(expand=True), agg_race_cat=True, verbose=verbose, no_id="test")
 
-        if log_result:
-            log_to_excel(table, datasets.iloc[i]["Year"])
+        log_to_json(orig_columns, table.get_transform_map(), csv_filename, 
+                    datasets.iloc[i]["SourceName"], datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"])
     
 
-print("data main function complete")
+logger.info("Complete")
