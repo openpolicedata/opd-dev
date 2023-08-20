@@ -1,9 +1,11 @@
 import copy
+import re
 import os
 import pickle
 import sys
 from datetime import date
 import logging
+from glob import glob
 import pandas as pd
 from datetime import datetime
 if os.path.basename(os.getcwd()) == "openpolicedata":
@@ -20,7 +22,7 @@ output_dir = os.path.join(output_dir, 'standardization')
 if not os.path.exists(output_dir):
     raise FileNotFoundError(f"Output directory {output_dir} does not exist")
 
-istart = 819
+istart = 660 #727, 241, 242, 255, 277, 430
 
 csvfile = None
 csvfile = r"..\opd-data\opd_source_table.csv"
@@ -30,7 +32,7 @@ run_all_agencies = True  # Run all agencies for multi-agency cases
 verbose = False
 allowed_updates = []
 
-skip_sources = [("Norristown", "USE OF FORCE", 2017)]
+skip_sources = []
 logger = logging.getLogger("opd")
 sh = logging.StreamHandler()
 fh = logging.FileHandler(os.path.join(output_dir, f'std_log_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'))
@@ -52,15 +54,59 @@ if run_all_stanford:
 else:
     max_num_stanford = 20
 
+# std_file = r"C:\Users\matth\repos\opd-data\column_maps.json"
+# if os.path.exists(std_file):
+#     with open(std_file, 'r') as json_file:
+#         std_map = json.loads(json_file.read())
+# else:
+#     std_map = {} 
+
 prev_columns = []
 prev_maps = {}
 def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, year):
     pkl_filename = os.path.join(output_dir, os.path.basename(csv_filename).replace(".csv",".pkl"))
     if os.path.exists(pkl_filename):
         old_data_maps = pickle.load(open(pkl_filename, "rb"))
+        for d in old_data_maps:
+            if isinstance(d.orig_column_name, list):
+                orig_mapping = [x for x in old_data_maps if 
+                                x.new_column_name==d.new_column_name and x.orig_column_name!=d.orig_column_name]
+                if len(orig_mapping)>0:
+                    new_mapping = [x for x in data_maps if 
+                                x.new_column_name==d.new_column_name+"_ONLY"]
+                    if len(new_mapping)>0:
+                        orig_mapping[0].new_column_name = new_mapping[0].new_column_name
+            m = re.search("(.+)_CIVILIAN",d.new_column_name)
+            if m:
+                d.new_column_name = "SUBJECT_" + m.groups()[0]
+            m = re.search("(.+)_OFFICER",d.new_column_name)
+            if m and ("CIVILIAN" not in d.new_column_name and "SUBJECT" not in d.new_column_name):
+                d.new_column_name = "OFFICER_" + m.groups()[0]
+
+            m = re.search("(.+)_OFF_AND_CIV",d.new_column_name)
+            if m:
+                d.new_column_name = m.groups()[0] + "_OFFICER/SUBJECT"
+
+            if d.new_column_name == "CIVILIAN_OR_OFFICER":
+                d.new_column_name = "SUBJECT_OR_OFFICER"
+                for k,v in d.data_maps.items():
+                    if v == "CIVILIAN":
+                        d.data_maps[k] = "SUBJECT"
+
+            if d.orig_column_name == ['RACE_ONLY_OFF_AND_CIV', 'ETHNICITY_OFF_AND_CIV']:
+                d.orig_column_name = ['RACE_ONLY_OFFICER/SUBJECT', 'ETHNICITY_OFFICER/SUBJECT']
+            if d.orig_column_name == ['RACE_ONLY_CIVILIAN', 'ETHNICITY_CIVILIAN']:
+                d.orig_column_name = ['SUBJECT_RACE_ONLY', 'SUBJECT_ETHNICITY']
+            if d.orig_column_name == ['RACE_ONLY_OFFICER', 'ETHNICITY_OFFICER']:
+                d.orig_column_name = ['OFFICER_RACE_ONLY', 'OFFICER_ETHNICITY']
+            # if isinstance(d.orig_column_name,str) and d.orig_column_name.startswith("RAW_") and d.orig_column_name[4:]==d.new_column_name:
+            #     d.orig_column_name=d.new_column_name
+
         if data_maps==old_data_maps:
+            # Update to deal with pandas back-compatibility issue
+            pickle.dump(data_maps, open(pkl_filename, "wb"))
             return
-        elif any(x[0]==source_name and (len(x)<2 or x[1]==table_type) and (len(x)<3 or year in x[2]) for x in allowed_updates):
+        elif any([x[0]==source_name and (len(x)<2 or x[1]==table_type) and (len(x)<3 or year in x[2]) for x in allowed_updates]):
             pass
         else:
             logger.info("Data maps do not match")
@@ -87,8 +133,6 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
 
                     is_equal2 = [x for x in old_data_maps[j:] if x==data_maps[k]]
                     if len(is_equal2)==0:
-                        if len(is_equal1)==0:
-                            raise NotImplementedError()
                         logger.info("Unmatched new column: ")
                         logger.info(data_maps[k])
                         k+=1
@@ -207,6 +251,14 @@ for i in range(istart, len(datasets)):
         years = src.get_years(datasets.iloc[i]["TableType"])
         years.sort(reverse=True)
         load_by_year = True
+    except opd.exceptions.OPD_DataUnavailableError:
+        csv_filename = src.get_csv_filename(2023, backup_dir, datasets.iloc[i]["TableType"], 
+                    agency=agency)
+        csv_filename = csv_filename.replace("2023","*").replace(".csv",".*")
+        all_files = glob(csv_filename)
+        years = [int(re.findall("_(\d+).(csv|zip)", x)[0][0]) for x in all_files]
+        years.sort(reverse=True)
+        load_by_year = True
     except Exception as e:
         if datasets.iloc[i]["DataType"] not in ["CSV", "Excel"]:
             raise
@@ -235,19 +287,43 @@ for i in range(istart, len(datasets)):
             
             if os.path.exists(zip_filename) or os.path.exists(csv_filename):
                 is_zip = os.path.exists(zip_filename)
-                table = src.load_from_csv(y, table_type=datasets.iloc[i]["TableType"], 
-                    agency=agency,output_dir=backup_dir, zip=is_zip)
+                try:
+                    table = src.load_from_csv(y, table_type=datasets.iloc[i]["TableType"], 
+                        agency=agency,output_dir=backup_dir, zip=is_zip)
+                except pd.errors.EmptyDataError:
+                    continue
+                except:
+                    raise
             elif run_all_years:
                 table = src.load_from_url(y, table_type=datasets.iloc[i]["TableType"], 
                         agency=agency)
-                if table.table is None:
+                if len(table.table)==0:
                     continue
                 table.to_csv(output_dir=backup_dir)
             else:
                 continue
             
             orig_columns = table.table.columns
-            table.standardize(race_cats= opd.defs.get_race_cats(expand=True), agg_race_cat=True, verbose=verbose, no_id="test")
+            table.standardize(race_cats= "expand", agg_race_cat=True, verbose=verbose, no_id="test")
+
+            # col_map = {}
+            # for x in table.get_transform_map():
+            #     k = ",".join(x.orig_column_name) if isinstance(x.orig_column_name,list) else x.orig_column_name
+            #     col_map[k] = x.new_column_name
+
+            # # Check if data in map
+            # if datasets.iloc[i]["State"] not in std_map:
+            #     std_map[datasets.iloc[i]["State"]] = {}
+            # if datasets.iloc[i]["SourceName"] not in std_map[datasets.iloc[i]["State"]]:
+            #     std_map[datasets.iloc[i]["State"]][datasets.iloc[i]["SourceName"]] = {}
+            # if datasets.iloc[i]["TableType"] in std_map[datasets.iloc[i]["State"]][datasets.iloc[i]["SourceName"]]:
+            #     raise NotImplementedError("Need to implement")
+            # else:
+            #     is_accepted = False
+            #     if is_accepted:
+            #         std_map[datasets.iloc[i]["State"]][datasets.iloc[i]["SourceName"]][datasets.iloc[i]["TableType"]] = []
+                    
+            #         std_map[datasets.iloc[i]["State"]][datasets.iloc[i]["SourceName"]][datasets.iloc[i]["TableType"]]
 
             if table.is_std:
                 log_to_json(orig_columns, table.get_transform_map(), csv_filename, 
@@ -264,12 +340,17 @@ for i in range(istart, len(datasets)):
             table = src.load_from_csv(datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
                 agency=agency,output_dir=backup_dir, zip=is_zip)
         else:
-            table = src.load_from_url(datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
-                    agency=agency)
+            try:
+                table = src.load_from_url(datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
+                        agency=agency)
+            except opd.exceptions.OPD_FutureError:
+                continue
+            except:
+                raise
             table.to_csv(output_dir=backup_dir)
 
         orig_columns = table.table.columns
-        table.standardize(race_cats= opd.defs.get_race_cats(expand=True), agg_race_cat=True, verbose=verbose, no_id="test")
+        table.standardize(race_cats= "expand", agg_race_cat=True, verbose=verbose, no_id="test")
 
         log_to_json(orig_columns, table.get_transform_map(), csv_filename, 
                     datasets.iloc[i]["SourceName"], datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"])
