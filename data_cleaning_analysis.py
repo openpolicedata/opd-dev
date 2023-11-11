@@ -22,7 +22,7 @@ output_dir = os.path.join(output_dir, 'standardization')
 if not os.path.exists(output_dir):
     raise FileNotFoundError(f"Output directory {output_dir} does not exist")
 
-istart = 660 #727, 241, 242, 255, 277, 430
+istart = 786 #727, 241, 242, 255, 277, 430
 
 csvfile = None
 csvfile = r"..\opd-data\opd_source_table.csv"
@@ -64,89 +64,191 @@ else:
 prev_columns = []
 prev_maps = {}
 def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, year):
-    pkl_filename = os.path.join(output_dir, os.path.basename(csv_filename).replace(".csv",".pkl"))
-    if os.path.exists(pkl_filename):
-        old_data_maps = pickle.load(open(pkl_filename, "rb"))
-        for d in old_data_maps:
-            if isinstance(d.orig_column_name, list):
-                orig_mapping = [x for x in old_data_maps if 
-                                x.new_column_name==d.new_column_name and x.orig_column_name!=d.orig_column_name]
-                if len(orig_mapping)>0:
-                    new_mapping = [x for x in data_maps if 
-                                x.new_column_name==d.new_column_name+"_ONLY"]
-                    if len(new_mapping)>0:
-                        orig_mapping[0].new_column_name = new_mapping[0].new_column_name
-            m = re.search("(.+)_CIVILIAN",d.new_column_name)
-            if m:
-                d.new_column_name = "SUBJECT_" + m.groups()[0]
-            m = re.search("(.+)_OFFICER",d.new_column_name)
-            if m and ("CIVILIAN" not in d.new_column_name and "SUBJECT" not in d.new_column_name):
-                d.new_column_name = "OFFICER_" + m.groups()[0]
+    pkl_filename_wc = os.path.basename(csv_filename).replace(".csv","*.pkl")
+    pkl_filename_in = glob(os.path.join(output_dir, pkl_filename_wc))
+    pkl_filename_out = os.path.join(output_dir, 
+                 os.path.basename(csv_filename).replace(".csv","") + f"_{datetime.now().strftime('%Y%m%d')}_pd{pd.__version__.replace('.','_')}.pkl")
+    if len(pkl_filename_in)>1:
+        for p in pkl_filename_in[:-1]:
+            os.remove(p)
+        pkl_filename_in = [pkl_filename_in[-1]]
+    if len(pkl_filename_in)>0:
+        try:
+            old_data_maps = pickle.load(open(pkl_filename_in[0], "rb"))
+        except ModuleNotFoundError as e:
+            if "_pd" in pkl_filename_in[0]:
+                raise NotImplementedError("pd version access")
+            else:
+                os.remove(pkl_filename_in[0])
+                pkl_filename_in = []
+        except:
+            raise
+    if len(pkl_filename_in)>0:
+        rs = None
+        ofs = None
+        rofs = None
+        new_cols = [x.new_column_name for x in old_data_maps]
 
-            m = re.search("(.+)_OFF_AND_CIV",d.new_column_name)
-            if m:
-                d.new_column_name = m.groups()[0] + "_OFFICER/SUBJECT"
+        if "SUBJECT_RACE_ONLY" in new_cols:
+            rs = "RACE/ETHNICITY"
+            for d in old_data_maps:
+                if d.new_column_name=="SUBJECT_RACE":
+                    d.new_column_name="SUBJECT_RACE/ETHNICITY"
+                    d.orig_column_name[0] = "SUBJECT_RACE"
+                if d.new_column_name=="SUBJECT_RACE_ONLY":
+                    d.new_column_name="SUBJECT_RACE"
+        elif "SUBJECT_RACE" in new_cols:
+            rs = 'RACE'
+            if "SUBJECT_ETHNICITY" not in new_cols:
+                idx = [k for k,x in enumerate(new_cols) if x=="SUBJECT_RACE"][0]
+                if "HISPANIC / LATINO" in old_data_maps[idx].data_maps.values():
+                    rs = "RACE/ETHNICITY"
+                    old_data_maps[idx].new_column_name = "SUBJECT_RACE/ETHNICITY"
+                    idx = [k for k,x in enumerate(new_cols) if x=="SUBJECT_RE_GROUP"]
+                    if idx:
+                        old_data_maps[idx[0]].orig_column_name = "SUBJECT_RACE/ETHNICITY"
+        elif "OFFICER/SUBJECT_RACE_ONLY" in new_cols:
+            rofs = "RACE/ETHNICITY"
+            for d in old_data_maps:
+                if d.new_column_name=="OFFICER/SUBJECT_RACE":
+                    d.new_column_name="OFFICER/SUBJECT_RACE/ETHNICITY"
+                    d.orig_column_name[0] = "OFFICER/SUBJECT_RACE"
+                if d.new_column_name=="OFFICER/SUBJECT_RACE_ONLY":
+                    d.new_column_name="OFFICER/SUBJECT_RACE"
+        elif "OFFICER/SUBJECT_RACE" in new_cols:
+            rofs = 'RACE'
+            if "OFFICER/SUBJECT_ETHNICITY" not in new_cols:
+                idx = [k for k,x in enumerate(new_cols) if x=="OFFICER/SUBJECT_RACE"][0]
+                if "HISPANIC / LATINO" in old_data_maps[idx].data_maps.values():
+                    rofs = "RACE/ETHNICITY"
+                    old_data_maps[idx].new_column_name = "OFFICER/SUBJECT_RACE/ETHNICITY"
+                    idx = [k for k,x in enumerate(new_cols) if x=="OFFICER/SUBJECT_RE_GROUP"]
+                    if idx:
+                        old_data_maps[idx[0]].orig_column_name = "OFFICER/SUBJECT_RACE/ETHNICITY"
 
-            if d.new_column_name == "CIVILIAN_OR_OFFICER":
-                d.new_column_name = "SUBJECT_OR_OFFICER"
-                for k,v in d.data_maps.items():
-                    if v == "CIVILIAN":
-                        d.data_maps[k] = "SUBJECT"
+        if "OFFICER_RACE_ONLY" in new_cols:
+            ofs = "RACE/ETHNICITY"
+            for d in old_data_maps:
+                if d.new_column_name=="OFFICER_RACE":
+                    d.new_column_name="OFFICER_RACE/ETHNICITY"
+                    d.orig_column_name[0] = "OFFICER_RACE"
+                if d.new_column_name=="OFFICER_RACE_ONLY":
+                    d.new_column_name="OFFICER_RACE"
+        elif "OFFICER_RACE" in new_cols:
+            ofs = 'RACE'
+            if "OFFICER_ETHNICITY" not in new_cols:
+                idx = [k for k,x in enumerate(new_cols) if x=="OFFICER_RACE"][0]
+                if "HISPANIC / LATINO" in old_data_maps[idx].data_maps.values():
+                    ofs = "RACE/ETHNICITY"
+                    old_data_maps[idx].new_column_name = "OFFICER_RACE/ETHNICITY"
+                    idx = [k for k,x in enumerate(new_cols) if x=="OFFICER_RE_GROUP"]
+                    if len(idx):
+                        old_data_maps[idx[0]].orig_column_name = "OFFICER_RACE/ETHNICITY"
 
-            if d.orig_column_name == ['RACE_ONLY_OFF_AND_CIV', 'ETHNICITY_OFF_AND_CIV']:
-                d.orig_column_name = ['RACE_ONLY_OFFICER/SUBJECT', 'ETHNICITY_OFFICER/SUBJECT']
-            if d.orig_column_name == ['RACE_ONLY_CIVILIAN', 'ETHNICITY_CIVILIAN']:
-                d.orig_column_name = ['SUBJECT_RACE_ONLY', 'SUBJECT_ETHNICITY']
-            if d.orig_column_name == ['RACE_ONLY_OFFICER', 'ETHNICITY_OFFICER']:
-                d.orig_column_name = ['OFFICER_RACE_ONLY', 'OFFICER_ETHNICITY']
-            # if isinstance(d.orig_column_name,str) and d.orig_column_name.startswith("RAW_") and d.orig_column_name[4:]==d.new_column_name:
-            #     d.orig_column_name=d.new_column_name
+        if rs is not None and 'SUBJECT_RE_GROUP' not in new_cols:
+            old_data_maps.append(opd._preproc_utils.DataMapping(orig_column_name="SUBJECT_"+rs, new_column_name='SUBJECT_RE_GROUP'))
+
+        if ofs is not None and 'OFFICER_RE_GROUP' not in new_cols:
+            old_data_maps.append(opd._preproc_utils.DataMapping(orig_column_name="OFFICER_"+ofs, new_column_name='OFFICER_RE_GROUP'))
+
+        if rofs is not None and 'OFFICER/SUBJECT_RE_GROUP' not in new_cols:
+            old_data_maps.append(opd._preproc_utils.DataMapping(orig_column_name="OFFICER/SUBJECT_"+rofs, new_column_name='OFFICER/SUBJECT_RE_GROUP'))
+
+        for j, c in enumerate(new_cols):
+            if "RACE" in c and old_data_maps[j].data_maps:
+                for k,v in old_data_maps[j].data_maps.items():
+                    if pd.notnull(k) and isinstance(k,(str,list)) and not (v=="HISPANIC / LATINO" or v=="HISPANIC/LATINO") and \
+                        (v!="WHITE" and (not isinstance(v,list) or "WHITE" not in v)) and \
+                            re.findall('whi?te',k,re.IGNORECASE):
+                        v = [v,'WHITE']
+                        old_data_maps[j].data_maps[k] = v
+                    if " / " in v:
+                        v = v.replace(" / ","/")
+                        old_data_maps[j].data_maps[k] = v
+                    if pd.notnull(k) and isinstance(k,str) and k.lower() in ["f",'filipino'] and v=='ASIAN/PACIFIC ISLANDER':
+                        v = "ASIAN"
+                        old_data_maps[j].data_maps[k] = v
+                    if isinstance(v,list):
+                        for m,x in enumerate(v):
+                            if " / " in x:
+                                v[m] = x.replace(" / ","/")
+                                old_data_maps[j].data_maps[k] = v
+                        if 'HISPANIC/LATINO' in v:
+                            v = 'HISPANIC/LATINO'
+                            old_data_maps[j].data_maps[k] = v
 
         if data_maps==old_data_maps:
             # Update to deal with pandas back-compatibility issue
-            pickle.dump(data_maps, open(pkl_filename, "wb"))
+            if pkl_filename_out != pkl_filename_in[0]:
+                [os.remove(x) for x in pkl_filename_in]
+                pickle.dump(data_maps, open(pkl_filename_out, "wb"))
             return
         elif any([x[0]==source_name and (len(x)<2 or x[1]==table_type) and (len(x)<3 or year in x[2]) for x in allowed_updates]):
             pass
         else:
-            logger.info("Data maps do not match")
-            j=k=0
-            while j < len(old_data_maps) and k < len(data_maps):
-                if old_data_maps[j]==data_maps[k]:
-                    k+=1
-                    j+=1
-                    continue
-                if old_data_maps[j].new_column_name == data_maps[k].new_column_name:
-                    logger.info("Unequal column data")
-                    logger.info("Old data map")
-                    logger.info(old_data_maps[j])
-                    logger.info("\nNew data map: ")
-                    logger.info(data_maps[k])
-                    k+=1
-                    j+=1
-                else:
-                    is_equal1 = [x for x in data_maps[k+1:] if x==old_data_maps[j]]
-                    if len(is_equal1)==0:
-                        logger.info("Unmatched old column: ")
+            diff_found = False
+            idx_old = [-1 for _ in old_data_maps]
+            matches_old = [False for _ in old_data_maps]
+            idx_new = [-1 for _ in data_maps]
+            matches_new = [False for _ in data_maps]
+            for j in range(len(old_data_maps)):
+                for k in range(len(data_maps)):
+                    if idx_new[k]>=0:
+                        continue
+                    if old_data_maps[j]==data_maps[k]:
+                        idx_old[j] = k
+                        idx_new[k] = j
+                        matches_old[j] = matches_new[k] = True
+                        break
+                    elif old_data_maps[j].new_column_name == data_maps[k].new_column_name:
+                        # if old_data_maps[j].orig_value_counts is not None:
+                        #     old_data_maps[j].orig_value_counts.index = old_data_maps[j].orig_value_counts.index.astype(data_maps[k].orig_value_counts.index.dtype)
+                        if old_data_maps[j].orig_column_name == data_maps[k].orig_column_name:
+                            for key in old_data_maps[j].data_maps.keys():
+                                key2 = key
+                                if pd.isnull(key):
+                                    key2 = [x for x in data_maps[k].data_maps.keys() if pd.isnull(x)][0]
+                                if old_data_maps[j].data_maps[key]!=data_maps[k].data_maps[key2]:
+                                    if isinstance(old_data_maps[j].data_maps[key], list) and \
+                                        isinstance(data_maps[k].data_maps[key], list) and \
+                                        len(old_data_maps[j].data_maps[key])==len(data_maps[k].data_maps[key]) and \
+                                        set(old_data_maps[j].data_maps[key])==set(data_maps[k].data_maps[key]):
+                                        continue
+                                    break
+                            else:
+                                idx_old[j] = k
+                                idx_new[k] = j
+                                matches_old[j] = matches_new[k] = True
+                                break
+                            
+                        idx_old[j] = k
+                        idx_new[k] = j
+                        matches_old[j] = matches_new[k] = False
+                        logger.info("Unequal column data")
+                        logger.info("Old data map")
                         logger.info(old_data_maps[j])
-                        j+=1
-
-                    is_equal2 = [x for x in old_data_maps[j:] if x==data_maps[k]]
-                    if len(is_equal2)==0:
-                        logger.info("Unmatched new column: ")
+                        logger.info("\nNew data map: ")
                         logger.info(data_maps[k])
-                        k+=1
+                        diff_found = True
+                        break
+                else:
+                    logger.info("Unmatched old column: ")
+                    logger.info(old_data_maps[j])
+                    diff_found = True
 
-            for j in range(j, len(old_data_maps)):
-                logger.info("Unmatched old column:")
-                logger.info(old_data_maps[j])
-            for k in range(k, len(data_maps)):
-                logger.info("Unmatched new column:")
-                logger.info(data_maps[k]) 
+            for k in range(len(data_maps)):
+                if idx_new[k]<0:
+                    logger.info("Unmatched new column: ")
+                    logger.info(data_maps[k])
+                    diff_found = True
 
             raise_error = True
-            if raise_error:
-                raise ValueError(f"Check {pkl_filename}!")
+            if diff_found and raise_error:
+                raise ValueError(f"Check {pkl_filename_in[0]}!")
+            elif not diff_found:
+                [os.remove(x) for x in pkl_filename_in]
+                pickle.dump(data_maps, open(pkl_filename_out, "wb"))
+                return
     
     logger.debug(f"Original columns:\n{orig_columns}")
     
@@ -195,7 +297,7 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
     logger.debug("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
     logger.debug("----------------------------------------------------------------------------")
 
-    pickle.dump(data_maps, open(pkl_filename, "wb"))
+    pickle.dump(data_maps, open(pkl_filename_out, "wb"))
 
 
 num_stanford = 0
@@ -256,15 +358,17 @@ for i in range(istart, len(datasets)):
                     agency=agency)
         csv_filename = csv_filename.replace("2023","*").replace(".csv",".*")
         all_files = glob(csv_filename)
-        years = [int(re.findall("_(\d+).(csv|zip)", x)[0][0]) for x in all_files]
+        years = [int(re.findall(r"_(\d+).(csv|zip)", x)[0][0]) for x in all_files]
         years.sort(reverse=True)
         load_by_year = True
+    except opd.exceptions.OPD_FutureError:
+        continue
     except Exception as e:
         if datasets.iloc[i]["DataType"] not in ["CSV", "Excel"]:
             raise
         load_by_year = False
 
-    if ".zip" in datasets.iloc[i]["URL"]:
+    if ".zip" in datasets.iloc[i]["URL"] and datasets.iloc[i]["Year"]==opd.defs.MULTI:
         load_by_year = False
 
     if load_by_year:
@@ -295,8 +399,13 @@ for i in range(istart, len(datasets)):
                 except:
                     raise
             elif run_all_years:
-                table = src.load_from_url(y, table_type=datasets.iloc[i]["TableType"], 
-                        agency=agency)
+                try:
+                    table = src.load_from_url(y, table_type=datasets.iloc[i]["TableType"], 
+                            agency=agency)
+                except opd.exceptions.OPD_FutureError:
+                    continue
+                except:
+                    raise
                 if len(table.table)==0:
                     continue
                 table.to_csv(output_dir=backup_dir)
