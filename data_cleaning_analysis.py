@@ -22,7 +22,7 @@ output_dir = os.path.join(output_dir, 'standardization')
 if not os.path.exists(output_dir):
     raise FileNotFoundError(f"Output directory {output_dir} does not exist")
 
-istart = 786 #727, 241, 242, 255, 277, 430
+istart = 883 #727, 241, 242, 255, 277, 430
 
 csvfile = None
 csvfile = r"..\opd-data\opd_source_table.csv"
@@ -54,13 +54,6 @@ if run_all_stanford:
 else:
     max_num_stanford = 20
 
-# std_file = r"C:\Users\matth\repos\opd-data\column_maps.json"
-# if os.path.exists(std_file):
-#     with open(std_file, 'r') as json_file:
-#         std_map = json.loads(json_file.read())
-# else:
-#     std_map = {} 
-
 prev_columns = []
 prev_maps = {}
 def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, year):
@@ -77,7 +70,9 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
             old_data_maps = pickle.load(open(pkl_filename_in[0], "rb"))
         except ModuleNotFoundError as e:
             if "_pd" in pkl_filename_in[0]:
-                raise NotImplementedError("pd version access")
+                os.remove(pkl_filename_in[0])
+                pkl_filename_in = []
+                # raise NotImplementedError("pd version access")
             else:
                 os.remove(pkl_filename_in[0])
                 pkl_filename_in = []
@@ -155,13 +150,18 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
             old_data_maps.append(opd._preproc_utils.DataMapping(orig_column_name="OFFICER/SUBJECT_"+rofs, new_column_name='OFFICER/SUBJECT_RE_GROUP'))
 
         for j, c in enumerate(new_cols):
+            if old_data_maps[j].data_maps is not None and any([isinstance(x,list) for x in old_data_maps[j].data_maps.values()]):
+                for k,v in old_data_maps[j].data_maps.items():
+                    if isinstance(v, list):
+                        v.sort()
+                        old_data_maps[j].data_maps[k] = ", ".join(v)
             if "RACE" in c and old_data_maps[j].data_maps:
                 for k,v in old_data_maps[j].data_maps.items():
-                    if pd.notnull(k) and isinstance(k,(str,list)) and not (v=="HISPANIC / LATINO" or v=="HISPANIC/LATINO") and \
-                        (v!="WHITE" and (not isinstance(v,list) or "WHITE" not in v)) and \
-                            re.findall('whi?te',k,re.IGNORECASE):
-                        v = [v,'WHITE']
-                        old_data_maps[j].data_maps[k] = v
+                    # if pd.notnull(k) and isinstance(k,(str,list)) and not (v=="HISPANIC / LATINO" or v=="HISPANIC/LATINO") and \
+                    #     (v!="WHITE" and (not isinstance(v,list) or "WHITE" not in v)) and \
+                    #         re.findall('whi?te',k,re.IGNORECASE):
+                    #     v = [v,'WHITE']
+                    #     old_data_maps[j].data_maps[k] = v
                     if " / " in v:
                         v = v.replace(" / ","/")
                         old_data_maps[j].data_maps[k] = v
@@ -206,13 +206,13 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
                         if old_data_maps[j].orig_column_name == data_maps[k].orig_column_name:
                             for key in old_data_maps[j].data_maps.keys():
                                 key2 = key
-                                if pd.isnull(key):
+                                if pd.isnull(key) or key=='NA':
                                     key2 = [x for x in data_maps[k].data_maps.keys() if pd.isnull(x)][0]
                                 if old_data_maps[j].data_maps[key]!=data_maps[k].data_maps[key2]:
                                     if isinstance(old_data_maps[j].data_maps[key], list) and \
-                                        isinstance(data_maps[k].data_maps[key], list) and \
-                                        len(old_data_maps[j].data_maps[key])==len(data_maps[k].data_maps[key]) and \
-                                        set(old_data_maps[j].data_maps[key])==set(data_maps[k].data_maps[key]):
+                                        isinstance(data_maps[k].data_maps[key2], list) and \
+                                        len(old_data_maps[j].data_maps[key])==len(data_maps[k].data_maps[key2]) and \
+                                        set(old_data_maps[j].data_maps[key])==set(data_maps[k].data_maps[key2]):
                                         continue
                                     break
                             else:
@@ -297,6 +297,7 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
     logger.debug("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
     logger.debug("----------------------------------------------------------------------------")
 
+    [os.remove(x) for x in pkl_filename_in]
     pickle.dump(data_maps, open(pkl_filename_out, "wb"))
 
 
