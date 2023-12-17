@@ -289,13 +289,16 @@ def match_street_word(x,y):
 def street_match(address, col_name, col, notfound='ignore'):
     addr_tags, _ = address_parser.tag(address, col_name)
 
-    matches = pd.Series(False, index=col.index)
+    matches = pd.Series(False, index=col.index, dtype='object')
     keys_check1 = [x for x in addr_tags.keys() if x.endswith('StreetName')]
     if notfound=='error' and len(keys_check1)==0:
         raise ValueError(f"'StreetName' not found in {address}")
     for idx in col.index:
-        ctags, _ = address_parser.tag(col[idx], col.name)
+        ctags, ctype = address_parser.tag(col[idx], col.name)
         keys_check2 = [x for x in ctags.keys() if x.endswith('StreetName')]
+        if ctype=='Null':
+            matches[idx] = True
+            continue
         if notfound=='error' and len(keys_check2)==0:
             raise ValueError(f"'StreetName' not found in {col[idx]}")
 

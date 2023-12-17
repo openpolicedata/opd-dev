@@ -12,7 +12,7 @@ from opddev.utils.ois_matching import date_col, race_col, agency_col, fatal_col,
 import openpolicedata as opd
 import logging
 
-istart = 0
+istart = 12#19
 logging_level = logging.DEBUG
 include_unknown_fatal = True
 
@@ -212,11 +212,15 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
             df_matches = df_test[is_match]
             if len(df_matches)>1:
                 date_close = ois_matching.in_date_range(df_matches[date_col], row_match[date_col], '1d')
-                addr_match = ois_matching.street_match(row_match[mpv_addr], mpv_addr, df_matches[addr_col], notfound='error')
+                if address_found:
+                    addr_match = ois_matching.street_match(row_match[mpv_addr], mpv_addr, df_matches[addr_col], notfound='error')
 
-                if date_close.sum()==1 and (addr_match[date_close].iloc[0] or not address_found):
+                if date_close.sum()==1 and (not address_found or addr_match[date_close].iloc[0]):
                     df_test = df_test.drop(index=df_matches[date_close].index)
                     mpv_matched[j] = True
+                elif not address_found and \
+                    ois_matching.in_date_range(df_matches[date_col], row_match[date_col], min_delta='300d').all():
+                    continue
                 elif not addr_match.any() or \
                     ois_matching.in_date_range(df_matches[addr_match][date_col], row_match[date_col], min_delta='300d').all():
                     continue
@@ -257,7 +261,7 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
 
         matches = ois_matching.street_match(df_test.iloc[j][addr_col], addr_col, mpv_unmatched[mpv_addr], notfound='error')
 
-        if (matches>0).any():
+        if matches.any():
             date_close = ois_matching.in_date_range(df_test.iloc[j][date_col], mpv_unmatched[matches][date_col], '3d')
             if date_close.any():
                 if date_close.sum()>1:
@@ -364,7 +368,7 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
             is_equal = True
             df_old = df_old.sort_values(by=date_col, ignore_index=True)
             df_save = df_save.sort_values(by=date_col, ignore_index=True)
-            for c in df_save.columns:
+            for c in [date_col]:  # Assuming that it's sufficient to check dates for matches
                 if c not in df_old or 'objectid' in c.lower() or c in ['OPD Hash']:
                     continue
                 if not df_old[c].equals(df_save[c]) and \
