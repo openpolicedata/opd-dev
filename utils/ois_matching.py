@@ -286,35 +286,49 @@ def match_street_word(x,y):
                 m.group(1)==n.group(1)
     return match
 
-def street_match(address, col_name, col, notfound='ignore'):
-    addr_tags, _ = address_parser.tag(address, col_name)
+def street_match(address, col_name, col, notfound='ignore', match_addr_null=False, match_col_null=True):
+    addr_tags, addr_type = address_parser.tag(address, col_name)
 
     matches = pd.Series(False, index=col.index, dtype='object')
+    if isinstance(addr_tags, list):
+        for t in addr_tags:
+            matches |= street_match(" ".join(t.values()), col_name, col, notfound, match_addr_null, match_col_null)
+        return matches
     keys_check1 = [x for x in addr_tags.keys() if x.endswith('StreetName')]
-    if notfound=='error' and len(keys_check1)==0:
-        raise ValueError(f"'StreetName' not found in {address}")
+    if len(keys_check1)==0:
+        if notfound=='error' and addr_type!='Coordinates':
+            raise ValueError(f"'StreetName' not found in {address}")
+        else:
+            return pd.Series(match_addr_null, index=col.index, dtype='object')
     for idx in col.index:
-        ctags, ctype = address_parser.tag(col[idx], col.name)
-        keys_check2 = [x for x in ctags.keys() if x.endswith('StreetName')]
-        if ctype=='Null':
-            matches[idx] = True
-            continue
-        if notfound=='error' and len(keys_check2)==0:
-            raise ValueError(f"'StreetName' not found in {col[idx]}")
+        ctags_all, ctype_all = address_parser.tag(col[idx], col.name)
+        if not isinstance(ctags_all, list):
+            ctags_all = [ctags_all]
+            ctype_all = [ctype_all]
+        for ctags, ctype in zip(ctags_all, ctype_all):
+            keys_check2 = [x for x in ctags.keys() if x.endswith('StreetName')]
+            if ctype in ['Null','Coordinates']:
+                if match_col_null:
+                    matches[idx] = True
+                continue
+            if notfound=='error' and len(keys_check2)==0:
+                raise ValueError(f"'StreetName' not found in {col[idx]}")
 
-        for k1 in keys_check1:
-            words1 = split_words(addr_tags[k1].lower())
-            for k2 in keys_check2:
-                words2 = split_words(ctags[k2].lower())
-                for j,w in enumerate(words2[:len(words2)+1-len(words2)]):   # Indexing is to ensure that remaining words can be matched
-                    if match_street_word(w, words1[0]):
-                        # Check that rest of word matches
-                        for l in range(1, len(words1)):
-                            if not match_street_word(words1[l], words2[j+l]):
+            for k1 in keys_check1:
+                words1 = split_words(addr_tags[k1].lower())
+                for k2 in keys_check2:
+                    words2 = split_words(ctags[k2].lower())
+                    for j,w in enumerate(words2[:len(words2)+1-len(words2)]):   # Indexing is to ensure that remaining words can be matched
+                        if match_street_word(w, words1[0]):
+                            # Check that rest of word matches
+                            for l in range(1, len(words1)):
+                                if not match_street_word(words1[l], words2[j+l]):
+                                    break
+                            else:
+                                matches[idx] = True
                                 break
-                        else:
-                            matches[idx] = True
-                            break
+                    if matches[idx]:
+                        break
                 if matches[idx]:
                     break
             if matches[idx]:

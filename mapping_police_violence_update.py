@@ -12,7 +12,7 @@ from opddev.utils.ois_matching import date_col, race_col, agency_col, fatal_col,
 import openpolicedata as opd
 import logging
 
-istart = 12#19
+istart = 15#20
 logging_level = logging.DEBUG
 include_unknown_fatal = True
 
@@ -55,12 +55,15 @@ logger.debug(f"{len(df_ois)} datasets found")
 for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
     logger.debug(f'Running {k} of {len(df_ois)}: {row["SourceName"]} {row["TableType"]}')
     src = opd.Source(row["SourceName"], state=row["State"])    # Create source for agency
-    if row['TableType']==opd.defs.TableType.SHOOTINGS_INCIDENTS:
-        raise NotImplementedError("Need to handle data with information spread across multiple tables")
     
     t = src.load_from_url(row['Year'], row['TableType'])  # Load data
     t.standardize(agg_race_cat=True)
     t.expand(mismatch='splitsingle')
+    related_table, related_years = src.find_related_tables(t.table_type, sub_type='SUBJECTS')
+    if related_table:
+        t2 = src.load_from_url(related_years[0], related_table[0])
+        t2.standardize(agg_race_cat=True)
+        t = t.merge(t2, std_id=True)
     df_test = t.table
 
     df_test = ois_matching.remove_officer_rows(df_test)
@@ -102,7 +105,8 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
     agency_types = ['Area Rapid Transit Police Department','Police Department', 'Crisis Response Team', "Sheriff's Office", 
                     'Township Police Department',
                     'Police Bureau', 'State University Department of Public Safety',
-                    'Housing Authority Police Department','Marshal Service']
+                    'Housing Authority Police Department','Marshal Service',
+                    'Drug Enforcement Administration','Probation Department']
     for j, mpv_row in mpv_agency.iterrows():
         if mpv_row[agency_col] != row['AgencyFull'] and \
             mpv_row[agency_col] not in [row['Agency']+" "+x for x in agency_types] and \
@@ -118,6 +122,8 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
                     any([a.replace(row['Agency']+" ","").startswith(x) for x in agency_words])):
                     break
                 type_match = [x for x in agency_types if a.endswith(x)]
+                if len(type_match)==0:
+                    continue
                 stem = a.replace(type_match[0],"").strip()
                 type_match_opd = [x for x in agency_types if row['AgencyFull'].endswith(x)]
                 if not (type_match[0]==type_match_opd[0] or stem==row['Agency']) or \
@@ -180,6 +186,12 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
                     addr_match = ois_matching.street_match(df_matches[is_match][addr_col].iloc[0], addr_col, 
                                                            df_matches[is_match][addr_col].iloc[1:], notfound='error')
                     throw = not addr_match.all()
+                if throw:
+                    #Check if address only matches one case
+                    addr_match = ois_matching.street_match(row_match[mpv_addr], mpv_addr, df_matches[is_match][addr_col], notfound='error')
+                    throw = addr_match.sum()!=1
+                    if not throw:
+                        is_match = addr_match
             if throw:
                 if len(summary_col)>0:
                     throw = not (df_matches[summary_col]==df_matches[summary_col].iloc[0]).all().all()
@@ -211,7 +223,7 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
         if is_match.sum()>0:
             df_matches = df_test[is_match]
             if len(df_matches)>1:
-                date_close = ois_matching.in_date_range(df_matches[date_col], row_match[date_col], '1d')
+                date_close = ois_matching.in_date_range(df_matches[date_col], row_match[date_col], '3d')
                 if address_found:
                     addr_match = ois_matching.street_match(row_match[mpv_addr], mpv_addr, df_matches[addr_col], notfound='error')
 
@@ -219,17 +231,17 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
                     df_test = df_test.drop(index=df_matches[date_close].index)
                     mpv_matched[j] = True
                 elif not address_found and \
-                    ois_matching.in_date_range(df_matches[date_col], row_match[date_col], min_delta='300d').all():
+                    ois_matching.in_date_range(df_matches[date_col], row_match[date_col], min_delta='20d').all():
                     continue
-                elif not addr_match.any() or \
-                    ois_matching.in_date_range(df_matches[addr_match][date_col], row_match[date_col], min_delta='300d').all():
+                elif address_found and (not addr_match.any() or \
+                    ois_matching.in_date_range(df_matches[addr_match][date_col], row_match[date_col], min_delta='300d').all()):
                     continue
                 else:
                     raise NotImplementedError()
             elif not address_found and ois_matching.in_date_range(df_matches[date_col],row_match[date_col], min_delta='50d').iloc[0]:
                 continue
             else:
-                date_close = ois_matching.in_date_range(df_matches[date_col], row_match[date_col], '1d').iloc[0]
+                date_close = ois_matching.in_date_range(df_matches[date_col], row_match[date_col], '2d').iloc[0]
                 addr_match = ois_matching.street_match(row_match[mpv_addr], mpv_addr, df_matches[addr_col], notfound='error').iloc[0]
                 
                 if date_close and addr_match:
@@ -273,11 +285,13 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
                 subject_demo_correction[date_close] = df_test.iloc[j]
                 df_test = df_test.drop(index=df_test.index[j])
                 mpv_matched[date_close] = True
-            elif (abs(df_test.iloc[j][date_col]-mpv_unmatched[matches>0][date_col])<='300d').any():
+            elif (ois_matching.in_date_range(df_test.iloc[j][date_col], mpv_unmatched[matches][date_col], '300d')).any() and \
+                (len(mpv_unmatched[matches])>1 or address_parser.tag(mpv_unmatched[mpv_addr][matches].iloc[0], mpv_addr)[1]!='Coordinates'):
                 rcol = ois_matching.get_opd_race_col(df_test)
                 gcol = ois_matching.get_opd_gender_col(df_test)
                 acol = ois_matching.get_opd_age_col(df_test)
-                match_sum = (mpv_unmatched[matches>0][race_col] == df_test.iloc[j][rcol]).apply(lambda x: 1 if x else 0) + \
+                match_sum = \
+                    (mpv_unmatched[matches>0][race_col] == df_test.iloc[j][rcol]).apply(lambda x: 1 if x else 0) + \
                     (mpv_unmatched[matches>0][age_col] == df_test.iloc[j][acol]).apply(lambda x: 1 if x else 0) + \
                     (mpv_unmatched[matches>0][gender_col] == df_test.iloc[j][gcol]).apply(lambda x: 1 if x else 0)
                 if mpv_unmatched[matches>0]['officer_names'].notnull().any():
