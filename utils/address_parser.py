@@ -1,4 +1,5 @@
 import usaddress
+import json
 import pandas as pd
 import re
 from collections import OrderedDict
@@ -6,7 +7,7 @@ from openpolicedata.defs import states as states_dict
 from openpolicedata.utils import split_words
 
 STREET_NAMES = usaddress.STREET_NAMES
-STREET_NAMES.update(['la','bl','exwy','anue','corridor'])
+STREET_NAMES.update(['la','bl','exwy','anue','corridor','svrd'])
 # Not sure that these are ever street names
 STREET_NAMES.remove('fort') 
 STREET_NAMES.remove('center')
@@ -18,14 +19,28 @@ for v in states_dict.values():
 def find_address_col(df_test):
     addr_col = [x for x in df_test.columns if "LOCATION" in x.upper()]
     for col in addr_col:
-        tags = df_test[col].apply(lambda x: tag(x, col, error='ignore'))
+        try:
+            # Check if location is location on the body
+            if df_test[col].apply(lambda x: 
+                                  False if not isinstance(x,str) else
+                                   any([y in x.lower() for y in ['arm','torso','back','chest','hand','leg','abdomen','neck','throat','head']])
+                                   ).mean() > 0.8:
+                continue
+            tags = df_test[col].apply(lambda x: tag(x, col, error='ignore'))
+        except AttributeError as e:
+            if len(e.args)>0 and e.args[0]=="'bool' object has no attribute 'strip'":
+                continue
+            else:
+                raise
+        except:
+            # TODO: Replace with never produce an error
+            raise
         tags = tags[tags.apply(lambda x: isinstance(x[1],str) and x[1]!='Null')]
         if tags.apply(lambda x: x[1]).isin(['Street Address','Intersection','Block Address', 'Street Name', 
                                             'StreetDirectional', 'County', 'Building', 'Bridge']).all():
             return [col]
-        else:
-            return []
-    addr_col = [x for x in df_test.columns if x.upper() in ["STREET"]]
+
+    addr_col = [x for x in df_test.columns if x.upper() in ["STREET"] or x.upper().replace(" ","").startswith("STREETNAME")]
     if len(addr_col):
         return addr_col
     addr_col = [x for x in df_test.columns if 'address' in split_words(x,case='lower')]
@@ -35,8 +50,8 @@ _default_delims = ['^', r"\s", "$", ',']
 
 # Based on https://stackoverflow.com/questions/30045106/python-how-to-extend-str-and-overload-its-constructor
 class ReText(str):
-    def __new__(cls, value, name=None, opt=False, delims=_default_delims, lookahead=None):
-        lookahead = lookahead if lookahead else delims
+    @staticmethod
+    def __construct_string(value, name, opt, lookahead):
         if isinstance(value, list):
             value_list = value
             value = ''
@@ -72,23 +87,56 @@ class ReText(str):
                     slash_last = c=='\\'
 
                     
-            value+=r"?" 
+            value+=r"?"
 
+        return value
+
+    def __new__(cls, value, name=None, opt=False, delims=_default_delims, lookahead=None):
+        lookahead = lookahead if lookahead else delims
+
+        orig_value = value
+
+        value = ReText.__construct_string(value, name, opt, lookahead)
+        
         # explicitly only pass value to the str constructor
         self = super(ReText, cls).__new__(cls, value)
+        self.name = name
         self.opt = opt
+        delims = delims.copy()
+        lookahead = lookahead.copy()
         self.delims = delims
+        self.lookahead = lookahead
+        self.orig_value = orig_value
         return self
+    
+
+    def add_delim(self, delims, add_to_lookahead=True):
+        if isinstance(delims, str):
+            delims = [delims]
+
+        new_delims = self.delims.copy()
+        new_delims.extend(delims)
+        new_look = self.lookahead.copy()
+        if add_to_lookahead:
+            new_look.extend(delims)
+
+        return ReText(self.orig_value, self.name, self.opt, new_delims, new_look)
+    
+    
+    def change_opt(self, opt):
+        return ReText(self.orig_value, self.name, opt, self.delims, self.lookahead)
+
 
     def __add__(self, other):
         x = str(self)
         if isinstance(other, ReText):
             # This can probably be handled better in the case where ReText are nested
-            x+=r"("+ "|".join(self.delims) + ")"
-            if other.opt:
-                x+=r"*"
-            else:
-                x+=r"+"
+            if len(self.delims)>0:
+                x+=r"("+ "|".join(self.delims) + ")"
+                if other.opt:
+                    x+=r"*"
+                else:
+                    x+=r"+"
             return ReText(x+str(other), opt=other.opt, delims=other.delims)
         else:
             return x+other
@@ -115,8 +163,10 @@ _opt_state = ReText([_states], 'StateName')
 _opt_zip = ReText(r'\d{5}+', 'ZipCode', opt=True)
 _opt_place_line = ReText("("+_opt_place+_opt_state+")",opt=True)+_opt_zip
 
-post_type_delims = _default_delims.copy()
-post_type_delims.extend([r'\n'])
+_p_zip_only = re.compile("^"+_opt_zip.change_opt(False)+"$")
+
+_post_type_delims = _default_delims.copy()
+_post_type_delims.extend([r'\n'])
 _block_num = ReText(r"\d+[0X]{2}", "BlockNumber")
 _block_ind = ReText([["Block of",'BLK', 'block', 'of']], "BlockIndicator")
 _block_ind2 = ReText('between', "BlockIndicator")
@@ -124,13 +174,18 @@ _opt_street_dir = ReText([usaddress.DIRECTIONS, r'\.?'], 'StreetNamePreDirection
 _street_name = ReText(r"i?[\w \.\-']+?", "StreetName")  # i- for interstates
 
 _pre_street_names = STREET_NAMES.copy()
+_pre_street_names.add('ih')
 _pre_street_names.remove("st")
 _pre_street_names.remove("la")
 _pre_street_names.remove("garden")
+
+_directions_expanded = list(usaddress.DIRECTIONS.copy())
+_directions_expanded.extend(['northbound','southbound','eastbound','westbound',r'n\s*/?\s*b',r's\s*/?\s*b',r'w\s*/?\s*b',r'e\s*/?\s*b'])
+
 _pre_type = r"("+ReText([_states])+r'(?=\s))?\s*'+str(ReText([_pre_street_names, r'\.?']))
 _opt_pre_type = r'\s*('+ReText(_pre_type, 'StreetNamePreType')+r"(?!\s("+"|".join(STREET_NAMES)+r")))?\s*"
-_opt_post_type = ReText([STREET_NAMES, r'\.?'], 'StreetNamePostType', opt=True, delims=post_type_delims)
-_opt_post_dir = ReText([usaddress.DIRECTIONS, r'\.?'], 'StreetNamePostDirectional', opt=True, delims=post_type_delims)
+_opt_post_type = ReText([STREET_NAMES, r'\.?'], 'StreetNamePostType', opt=True, delims=_post_type_delims)
+_opt_post_dir = ReText([_directions_expanded, r'\.?'], 'StreetNamePostDirectional', opt=True, delims=_post_type_delims)
 # post_type2 = ReText(r'\w+\.', 'StreetNamePostType', opt=False, delims=post_type_delims)
 _street_match = _opt_street_dir+_opt_pre_type+_street_name+_opt_post_type+_opt_post_dir
 _opt_address_num = ReText(r"[\dX]+", 'AddressNumber', opt=True)
@@ -148,6 +203,19 @@ _p_block2 = re.compile("^"+_opt_street_dir+_street_name+_opt_post_type+_opt_post
 _p_block3 = re.compile("^"+_block_num+_block_ind+_opt_street_dir+_street_name+_opt_post_type+_opt_post_dir+
                       _opt_place_line+_opt_near+_opt_cross_street+"$", re.IGNORECASE)
 
+_slash = ReText(r"\s*/\s*", 'BlockRangeSeparator',delims=[r'\s','\w'])
+_cross_street = ReText((_opt_street_dir+_street_name.add_delim("/")+_opt_post_type.add_delim("/")+_opt_post_dir.add_delim("/")).replace(r"(?P<StreetName", r"(?P<CrossStreetName"),
+                       delims=[r'\s','/'])
+_p_block4 = re.compile("^"+_cross_street+_slash+
+                       (_opt_street_dir+_street_name+_opt_post_type+_opt_post_dir).replace(r"(?P<StreetName", r"(?P<SecondCrossStreetName")+
+                       r'\s+\('+_block_num+_opt_street_dir+_street_name.add_delim(r'\)')+_opt_post_type.add_delim(r'\)')+_opt_post_dir.add_delim(r'\)')+r'\)'
+                       "$", re.IGNORECASE)
+
+_dir2 = ReText([_directions_expanded], 'Direction')
+_service_road = ReText([['svrd','service road']], 'SecondStreetNamePostType')
+_p_block_service_road = re.compile("^"+_block_num+_opt_street_dir+_street_name+_opt_post_type+_service_road+
+                                   _dir2.change_opt(False)+"$", re.IGNORECASE)
+
 _dir = ReText([usaddress.DIRECTIONS, r'\.?'], 'Direction')
 _opt_dist = ReText(r"\d+ miles?", 'Distance', opt=True)
 _of = ReText('of', 'Preposition')
@@ -157,7 +225,7 @@ _and_str = ReText([['and',r'&', r'/', 'at']], 'IntersectionSeparator')
 _county_delims = _default_delims.copy()
 _county_delims.append(r'\)')
   # Place name in parentheses
-_opt_place_in_paren = ReText(r"(\("+ReText(r"[a-z \.\n]+",'PlaceName', delims=_county_delims)+r"\))", opt=True, delims=["$"])
+_opt_place_in_paren = ReText(r"(\("+ReText(r"[a-z \.\n\-]+",'PlaceName', delims=_county_delims)+r"\))", opt=True, delims=["$"])
 _p_intersection = re.compile("^"+_street_match_w_addr+_and_str+
                              (_street_match_w_addr).ordinal(2)+
                              _opt_place_line+"$", re.IGNORECASE)
@@ -169,9 +237,6 @@ _p_intersection4 = re.compile("^"+_street_match_w_addr+_and_str+
                              (_street_match_w_addr).ordinal(2)+r",\s*"+
                              _opt_place_end+"$", re.IGNORECASE)
 _int_type = ReText("transition from", "IntersectionType")
-_directions_expanded = list(usaddress.DIRECTIONS.copy())
-_directions_expanded.extend(['northbound','southbound','eastbound','westbound',r'n\s*/?\s*b',r'w\s*/?\s*b',r'w\s*/?\s*b',r'e\s*/?\s*b'])
-_dir2 = ReText([_directions_expanded], 'Direction')
 _opt_place2 = ReText(r"(?<=\s)[a-z ]+", 'PlaceName')
 _p_intersection3 = re.compile("^"+_street_match+_int_type+_dir2+_street_match.ordinal(2)+_opt_place2+"$", re.IGNORECASE)
 
@@ -196,7 +261,7 @@ _p_address2 = re.compile("^"+_opt_building_name+_street_match_w_addr+
 _opt_place3 = ReText(r"(?<=\s)[a-z]+", 'PlaceName')
 _p_address3 = re.compile("^"+_opt_building_name+_opt_address_num+_opt_building_name.ordinal(2)+_street_match+
                         _opt_occupancy_type+_opt_occupancy_id+r",\s*"+
-                        _opt_place3+"$", re.IGNORECASE)
+                        _opt_place3+_opt_zip+"$", re.IGNORECASE)
 
 _address_ambiguous = ReText("space [\da-z]+", 'Ambiguous')
 _p_address_w_ambiguous = re.compile("^"+_opt_address_num+_street_match+_address_ambiguous+"$",re.IGNORECASE)
@@ -257,6 +322,7 @@ def _check_result(result, usa_result, col_name=None, address_string=None):
             # such as 'Columbia and North Fessenden'
             return True
         if 'StreetName' not in usa_result[0] or usa_result[0]['StreetName'].lower().startswith('and') or \
+            ' and ' in usa_result[0]['StreetName'].lower() or \
             result[0]['IntersectionSeparator']=='at' or \
             (result[0]['IntersectionSeparator']=='/' and ('IntersectionSeparator' not in usa_result[0] or usa_result[0]['IntersectionSeparator']!='/')) or \
             (usa_result[1]=='Intersection' and 'SecondStreetName' not in usa_result[0] and 'Recipient' in usa_result[0]):
@@ -287,7 +353,8 @@ def _check_result(result, usa_result, col_name=None, address_string=None):
             (all([x in usa_result[0].values() for x in result[0].values()]) and list(usa_result[0].keys())[-1]=='OccupancyIdentifier') or \
             (list(usa_result[0].keys())==['BuildingName'] and all([x in result[0].keys() for x in ["AddressNumber",'StreetName','StreetNamePostType']])) or \
             ('StateName' in usa_result[0] and usa_result[0]['StateName'] in ['INN', 'INN)']) or \
-            ("Ambiguous" in result[0] and result[0]['Ambiguous'].lower().startswith('space')):
+            ("Ambiguous" in result[0] and result[0]['Ambiguous'].lower().startswith('space')) or \
+            ('AddressNumber' in usa_result[0] and not usa_result[0]['AddressNumber'].isdigit() and not usa_result[0]['AddressNumber'].lower().endswith('x')):
             # usa_address unable to get President George Bush Hwy
             # usa_address has trouble with \n
             return True
@@ -300,7 +367,7 @@ def _check_result(result, usa_result, col_name=None, address_string=None):
             # usaddress might include newline character as part of name
             k_usa = "Recipient" if k=='BuildingName' else k
             k_usa = 'Recipient' if k_usa=='PlaceName' and 'PlaceName' not in usa_result[0] else k_usa
-            if k_usa not in usa_result[0] or usa_result[0][k_usa] not in [v, v+'\n', "("+v+")"]:
+            if k_usa not in usa_result[0] or usa_result[0][k_usa] not in [v, v+'\n', "("+v.replace('- ','')+")"]:
                 if k=="PlaceName" and k in usa_result[0] and "StateName" in result[0] and \
                     "StateName" not in usa_result[0] and usa_result[0][k]==v+" "+result[0]['StateName']:
                     # usaddress included state with place name
@@ -317,6 +384,13 @@ def _check_result(result, usa_result, col_name=None, address_string=None):
                     (v+" "+result[0][m]).replace(usa_result[0][k]+" ","") == usa_result[0][m]:
                     # usaddress put part of street name in post type
                     skip_next = True
+                elif k=='PlaceName' and 'PlaceName' not in usa_result[0] and "StateName" not in result[0] and "StateName" in usa_result[0] and \
+                    usa_result[0]['StateName']==v and v.title() not in _states:
+                    # usaddress mistakenly called this a state
+                    pass
+                elif k=='StreetName' and "StreetNamePreModifier" not in result[0] and "StreetNamePreModifier" in usa_result[0] and \
+                    v==usa_result[0]['StreetNamePreModifier']+" "+usa_result[0][k]:
+                    pass
                 else:
                     return False
             
@@ -329,16 +403,31 @@ def tag(address_string, col_name, error='raise'):
     assert error in ['raise','ignore']
     if pd.isnull(address_string):
         return ({}, "Null")
+    elif isinstance(address_string, dict):
+        if 'human_address' not in address_string.keys():
+            raise KeyError("Unknown dictionary keys for address")
+        address_dict = json.loads(address_string['human_address'])
+        result = tag(address_dict['address'], col_name, error)
+        if not all([x in ['address','city','state','zip'] for x in address_dict]):
+            raise NotImplementedError()
+        for k, kout in zip(['city','state','zip'], ['PlaceName','StateName','ZipCode']):
+            if k in address_dict and len(address_dict[k]):
+                result[0][kout] = address_dict[k]
+        return result
     
     # Ensure that /'s are surrounded by spaces
     address_string = address_string.strip().replace("/"," / ")
     m1=m2=m3=m4=m5=None
     if m1:=_address_search(_p_unknown, address_string):
         return (m1, 'Null')
+    if m1:=_address_search(_p_zip_only, address_string):
+        return _get_address_result(m1, "Ambiguous")
     if (m1:=_address_search(_p_block, address_string)) or \
         (m2:=_address_search(_p_block2, address_string)) or \
-        (m3:=_address_search(_p_block3, address_string)):
-        return _get_address_result([m1,m2,m3], "Block Address")
+        (m3:=_address_search(_p_block3, address_string)) or \
+        (m4:=_address_search(_p_block4, address_string)) or \
+        (m5:=_address_search(_p_block_service_road, address_string)):
+        return _get_address_result([m1,m2,m3,m4,m5], "Block Address")
     elif (m1:=_address_search(_p_directional, address_string)):
         return (m1, "StreetDirectional")
     elif (m1:=_address_search(_p_intersection, address_string)) or \
@@ -375,6 +464,8 @@ def _get_address_result(results, name, address_string=None, type_check=None, col
         if r:
             result = [r, name]
             break
+    else:
+        raise ValueError("No result found")
 
     if address_string or type_check:     
         try:

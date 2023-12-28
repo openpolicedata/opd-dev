@@ -60,10 +60,22 @@ def drop_duplicates(df, subset=None, ignore_null=False, ignore_date_errors=False
         df = df.copy()
         df[opd.defs.columns.DATE] = df[opd.defs.columns.DATE].apply(lambda x: x.replace(hour=0, minute=0, second=0))
 
-    df = df.drop_duplicates(subset=subset, ignore_index=True)
+    try:
+        df = df.drop_duplicates(subset=subset, ignore_index=True)
+        df_mod = df.copy()[subset]
+    except TypeError as e:
+        if len(e.args)>0 and e.args[0]=="unhashable type: 'dict'":
+            df_mod = df.copy()
+            df_mod = df_mod.apply(lambda x: x.apply(lambda y: str(y) if isinstance(y,dict) else y))
+            dups = df_mod.duplicated(subset=subset)
+            df = df[~dups].reset_index()
+            df_mod = df_mod[~dups].reset_index()[subset]
+        else:
+            raise
+    except:
+        raise
 
     # Attempt cleanup and try again
-    df_mod = df.copy()[subset]
     p = re.compile('\s?&\s?')
     df_mod = df_mod.apply(lambda x: x.apply(lambda x: p.sub(' and ',x).lower() if isinstance(x,str) else x))
 
@@ -99,18 +111,18 @@ def drop_duplicates(df, subset=None, ignore_null=False, ignore_date_errors=False
 
 def in_date_range(dt1, dt2, max_delta=None, min_delta=None):
     count1 = count2 = 1
-    if isinstance(dt1, pd.Series):
+    if is_series1:=isinstance(dt1, pd.Series):
         count1 = len(dt1)
-        if not isinstance(dt1, pd.Period):
+        if is_timestamp1:=not isinstance(dt1.dtype, pd.api.types.PeriodDtype):
             dt1 = dt1.dt.tz_localize(None)
-    elif isinstance(dt1, pd.Timestamp):
+    elif is_timestamp1:=isinstance(dt1, pd.Timestamp):
         dt1 = dt1.tz_localize(None)
 
-    if isinstance(dt2, pd.Series):
+    if is_series2:=isinstance(dt2, pd.Series):
         count2 = len(dt2)
-        if not isinstance(dt2, pd.Period):
+        if is_timestamp2:=not isinstance(dt2.dtype, pd.api.types.PeriodDtype):
             dt2 = dt2.dt.tz_localize(None)
-    elif isinstance(dt2, pd.Timestamp):
+    elif is_timestamp2:=isinstance(dt2, pd.Timestamp):
         dt2 = dt2.tz_localize(None)
 
     if count1!=count2 and not (count1==1 or count2==1):
@@ -124,26 +136,38 @@ def in_date_range(dt1, dt2, max_delta=None, min_delta=None):
         matches = True
 
     if max_delta:
-        if isinstance(dt1, pd.Period) and isinstance(dt2, pd.Period):
+        if not is_timestamp1 and not is_timestamp2:
             raise NotImplementedError()
-        elif isinstance(dt2, pd.Period):
+        elif not is_series2 and not is_timestamp2:
             matches = matches & (((dt2.end_time >= dt1) & (dt2.start_time <= dt1)) | \
                 ((dt2.end_time - dt1).abs()<=max_delta) | ((dt2.start_time - dt1).abs()<=max_delta))
-        elif isinstance(dt1, pd.Period):
+        elif not is_series1 and not is_timestamp1:
             matches = matches & (((dt1.end_time >= dt2) & (dt1.start_time <= dt2)) | \
                 ((dt1.end_time - dt2).abs()<=max_delta) | ((dt1.start_time - dt2).abs()<=max_delta))
+        elif is_series2 and not is_timestamp2:
+            matches = matches & (((dt2.dt.end_time >= dt1) & (dt2.dt.start_time <= dt1)) | \
+                ((dt2.dt.end_time - dt1).abs()<=max_delta) | ((dt2.dt.start_time - dt1).abs()<=max_delta))
+        elif is_series1 and not is_timestamp1:
+            matches = matches & (((dt1.dt.end_time >= dt2) & (dt1.dt.start_time <= dt2)) | \
+                ((dt1.dt.end_time - dt2).abs()<=max_delta) | ((dt1.dt.start_time - dt2).abs()<=max_delta))
         else:
             matches = matches & ((dt1 - dt2).abs()<=max_delta)
         
     if min_delta:
-        if isinstance(dt1, pd.Period) and isinstance(dt2, pd.Period):
+        if not is_timestamp1 and not is_timestamp2:
             raise NotImplementedError()
-        elif isinstance(dt2, pd.Period):
+        elif not is_series2 and not is_timestamp2:
             matches = matches & (((dt2.end_time >= dt1) & (dt2.start_time <= dt1)) | \
                 ((dt2.end_time - dt1).abs()>=min_delta) | ((dt2.start_time - dt1).abs()>=min_delta))
-        elif isinstance(dt1, pd.Period):
+        elif not is_series1 and not is_timestamp1:
             matches = matches & (((dt1.end_time >= dt2) & (dt1.start_time <= dt2)) | \
                 ((dt1.end_time - dt2).abs()>=min_delta) | ((dt1.start_time - dt2).abs()>=min_delta))
+        elif is_series2 and not is_timestamp2:
+            matches = matches & (((dt2.dt.end_time >= dt1) & (dt2.dt.start_time <= dt1)) | \
+                ((dt2.dt.end_time - dt1).abs()>=min_delta) | ((dt2.dt.start_time - dt1).abs()>=min_delta))
+        elif is_series1 and not is_timestamp1:
+            matches = matches & (((dt1.dt.end_time >= dt2) & (dt1.dt.start_time <= dt2)) | \
+                ((dt1.dt.end_time - dt2).abs()>=min_delta) | ((dt1.dt.start_time - dt2).abs()>=min_delta))
         else:
             matches = matches & ((dt1 - dt2).abs()>=min_delta)
 
@@ -188,6 +212,58 @@ def remove_officer_rows(df_test):
         df_test = df_test[df_test[role_col]==opd.defs.get_roles().SUBJECT]
     return df_test
 
+
+def _compare_values(orig_val, db_val, idx,
+                    col, db_col, rcol, gcol, acol, race_only_col,
+                    df_matches, num_matches, is_unknown, is_match, is_diff_race,
+                    allowed_replacements, check_race_only, inexact_age, max_age_diff,
+                    allow_race_diff):
+    if col==rcol:
+        # Check for comma-separated list
+        orig_val = orig_val.split(',')
+    else:
+        orig_val = [orig_val]
+
+    for val in orig_val:
+        if db_col in allowed_replacements and \
+            any([val in x and db_val in x for x in allowed_replacements[db_col]]):
+            # Allow values in allowed_replacements to be swapped
+            return
+        elif col==rcol and check_race_only and race_only_col in df_matches and \
+            df_matches.loc[idx,race_only_col]==db_val:
+            num_matches[idx]+=1
+            return
+        elif (pd.isnull(db_val) or db_val in ["UNKNOWN",'UNSPECIFIED']) and \
+            val not in ["UNKNOWN",'UNSPECIFIED']:
+            is_unknown[idx] = True
+            return
+        elif col==acol and isinstance(db_val, numbers.Number) and isinstance(val, numbers.Number) and \
+            pd.notnull(db_val) and pd.notnull(val):
+            if inexact_age:
+                # Allow year in df_match to be an estimate of the decade so 30 would be a match for any value from 30-39
+                is_match[idx] = val == math.floor(db_val/10)*10
+            else:
+                is_match[idx] = abs(val - db_val)<=max_age_diff
+            return
+        elif col==rcol and val in race_vals and db_val in race_vals:
+            if allow_race_diff:
+                is_diff_race[idx] = True
+            else:
+                is_match[idx] = False
+            return
+        elif col==rcol and (val.upper() in ["UNKNOWN",'UNSPECIFIED','OTHER','PENDING RELEASE'] or pd.isnull(val)):
+            return
+        elif col==gcol and val in gender_vals and db_val in gender_vals:
+            is_match[idx] = False
+            return
+        elif col==gcol and (val.upper() in ["UNKNOWN",'UNSPECIFIED','OTHER','PENDING RELEASE'] or pd.isnull(val)):
+            return
+        elif col==acol and pd.isnull(val) and pd.notnull(db_val):
+            return
+    else:
+        raise NotImplementedError(f"{col} not equal: OPD: {val} vs. {db_val}")
+
+
 def check_for_match(df_matches, row_match, max_age_diff=0, allowed_replacements=[],
                     check_race_only=False, inexact_age=False, allow_race_diff=False):
     is_unknown = pd.Series(False, index=df_matches.index)
@@ -206,39 +282,11 @@ def check_for_match(df_matches, row_match, max_age_diff=0, allowed_replacements=
         
         for idx in df_matches.index:
             if not_equal(df_matches.loc[idx, col], row_match[db_col]):
-                if db_col in allowed_replacements and \
-                    any([df_matches.loc[idx, col] in x and row_match[db_col] in x for x in allowed_replacements[db_col]]):
-                    # Allow values in allowed_replacements to be swapped
-                    continue
-                elif col==rcol and check_race_only and race_only_col in df_matches and \
-                    df_matches.loc[idx,race_only_col]==row_match[db_col]:
-                    num_matches[idx]+=1
-                    continue
-                elif (pd.isnull(row_match[db_col]) or row_match[db_col] in ["UNKNOWN",'UNSPECIFIED']) and \
-                    df_matches.loc[idx, col] not in ["UNKNOWN",'UNSPECIFIED']:
-                    is_unknown[idx] = True
-                elif col==acol and isinstance(row_match[db_col], numbers.Number) and isinstance(df_matches.loc[idx, col], numbers.Number) and \
-                    pd.notnull(row_match[db_col]) and pd.notnull(df_matches.loc[idx, col]):
-                    if inexact_age:
-                        # Allow year in df_match to be an estimate of the decade so 30 would be a match for any value from 30-39
-                        is_match[idx] = df_matches.loc[idx, col] == math.floor(row_match[db_col]/10)*10
-                    else:
-                        is_match[idx] = abs(df_matches.loc[idx, col] - row_match[db_col])<=max_age_diff
-                elif col==rcol and df_matches.loc[idx, col] in race_vals and row_match[db_col] in race_vals:
-                    if allow_race_diff:
-                        is_diff_race[idx] = True
-                    else:
-                        is_match[idx] = False
-                elif col==rcol and (df_matches.loc[idx, col].upper() in ["UNKNOWN",'UNSPECIFIED','OTHER','PENDING RELEASE'] or pd.isnull(df_matches.loc[idx, col])):
-                    pass
-                elif col==gcol and df_matches.loc[idx, col] in gender_vals and row_match[db_col] in gender_vals:
-                    is_match[idx] = False
-                elif col==gcol and (df_matches.loc[idx, col].upper() in ["UNKNOWN",'UNSPECIFIED','OTHER','PENDING RELEASE'] or pd.isnull(df_matches.loc[idx, col])):
-                    pass
-                elif col==acol and pd.isnull(df_matches.loc[idx, col]) and pd.notnull(row_match[db_col]):
-                    pass
-                else:
-                    raise NotImplementedError(f"{col} not equal: OPD: {df_matches.loc[idx, col]} vs. {row_match[db_col]}")
+                _compare_values(df_matches.loc[idx, col], row_match[db_col], idx,
+                    col, db_col, rcol, gcol, acol, race_only_col,
+                    df_matches, num_matches, is_unknown, is_match, is_diff_race,
+                    allowed_replacements, check_race_only, inexact_age, max_age_diff,
+                    allow_race_diff)
             else:
                 num_matches[idx]+=1
                 
@@ -252,7 +300,11 @@ def columns_for_duplicated_check(t, df_matches_raw):
     keep_cols = []
     for c in t.get_transform_map():
         # Looping over list of columns that were standardized which provides old and new column names
-        if "SUBJECT" in c.new_column_name:
+        if c.new_column_name==opd.defs.columns.INJURY_SUBJECT:
+            # Same subject can have multiple injuries
+            ignore_cols.append(c.new_column_name)
+            ignore_cols.append("RAW_"+c.orig_column_name)
+        elif "SUBJECT" in c.new_column_name:
             keep_cols.append(c.new_column_name)
         if "OFFICER" in c.new_column_name:
             # Officer columns may differ if multiple officers were involved
@@ -268,7 +320,9 @@ def columns_for_duplicated_check(t, df_matches_raw):
 
     for c in df_matches_raw.columns:
         # Remove potential record IDs
-        notin = ["officer", "narrative", "objectid", "incnum", 'text', ' hash', 'firearm','longitude','latitude','rank', 'globalid']
+        notin = ["officer", "narrative", "objectid", "incnum", 'text', ' hash', 
+                 'firearm','longitude','latitude','rank', 'globalid','rin',
+                 'description','force','ofc','sworn','emp','weapon','shots','reason']
         if c not in ignore_cols and c not in keep_cols and \
             ("ID" in [x.upper() for x in split_words(c)] or c.lower().startswith("off") or \
              any([x in c.lower() for x in notin]) or c.lower().startswith('raw_')):
