@@ -7,7 +7,7 @@ from openpolicedata.defs import states as states_dict
 from openpolicedata.utils import split_words
 
 STREET_NAMES = usaddress.STREET_NAMES
-STREET_NAMES.update(['la','bl','exwy','anue','corridor','svrd'])
+STREET_NAMES.update(['la','bl','exwy','anue','corridor'])
 # Not sure that these are ever street names
 STREET_NAMES.remove('fort') 
 STREET_NAMES.remove('center')
@@ -187,7 +187,8 @@ _opt_pre_type = r'\s*('+ReText(_pre_type, 'StreetNamePreType')+r"(?!\s("+"|".joi
 _opt_post_type = ReText([STREET_NAMES, r'\.?'], 'StreetNamePostType', opt=True, delims=_post_type_delims)
 _opt_post_dir = ReText([_directions_expanded, r'\.?'], 'StreetNamePostDirectional', opt=True, delims=_post_type_delims)
 # post_type2 = ReText(r'\w+\.', 'StreetNamePostType', opt=False, delims=post_type_delims)
-_street_match = _opt_street_dir+_opt_pre_type+_street_name+_opt_post_type+_opt_post_dir
+_opt_service_road = ReText([['svrd','service road']], 'StreetNameServiceRoadIndicator', opt=True)
+_street_match = _opt_street_dir+_opt_pre_type+_street_name+_opt_post_type+_opt_service_road+_opt_post_dir
 _opt_address_num = ReText(r"[\dX]+", 'AddressNumber', opt=True)
 _street_match_w_addr = _opt_address_num+_street_match
 
@@ -212,8 +213,7 @@ _p_block4 = re.compile("^"+_cross_street+_slash+
                        "$", re.IGNORECASE)
 
 _dir2 = ReText([_directions_expanded], 'Direction')
-_service_road = ReText([['svrd','service road']], 'SecondStreetNamePostType')
-_p_block_service_road = re.compile("^"+_block_num+_opt_street_dir+_street_name+_opt_post_type+_service_road+
+_p_block_service_road = re.compile("^"+_block_num+_opt_street_dir+_street_name+_opt_post_type+_opt_service_road.change_opt(False)+
                                    _dir2.change_opt(False)+"$", re.IGNORECASE)
 
 _dir = ReText([usaddress.DIRECTIONS, r'\.?'], 'Direction')
@@ -346,6 +346,8 @@ def _check_result(result, usa_result, col_name=None, address_string=None):
 
         return True
     elif result[1]=='Street Address':
+        if 'StreetNameServiceRoadIndicator' in result[0]:
+            return True
         if (usa_result[1]=='Ambiguous' and 'Recipient' in usa_result[0] and usa_result[0]['Recipient'].endswith('Hwy')) or \
             (usa_result[1]=='Ambiguous' and list(usa_result[0].keys()) == ['Recipient'] and \
                 col_name and col_name.lower() in ['street','street name'] and list(result[0].keys()) == ['StreetName']) or \

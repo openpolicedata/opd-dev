@@ -11,7 +11,7 @@ from opddev.utils import opd_logger
 import openpolicedata as opd
 import logging
 
-istart = 98
+istart = 0
 logging_level = logging.DEBUG
 include_unknown_fatal = True
 include_close_date_matching_zip = True
@@ -35,7 +35,7 @@ ch.setLevel(logging.DEBUG)
 logger.addHandler(ch)
 
 # Convert to OPD table so that standardization can be applied to so that terms for race and gender match OPD-loaded tables
-mpv = opd.data.Table({"SourceName":"Mapping Policing Violence", 
+mpv = opd.data.Table({"SourceName":"Mapping Police Violence", 
                       "State":opd.defs.MULTI, 
                       "TableType":opd.defs.TableType.SHOOTINGS}, 
                      mpv_raw,
@@ -66,7 +66,7 @@ df_ois = pd.concat(df_ois, ignore_index=True)
 
 logger.debug(f"{len(df_ois)} datasets found")
 for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
-    logger.debug(f'Running {k} of {len(df_ois)}: {row["SourceName"]} {row["TableType"]} {row["Year"] if row["Year"]!="MULTIPLE" else ""}')
+    logger.debug(f'Running {k+1} of {len(df_ois)}: {row["SourceName"]} {row["TableType"]} {row["Year"] if row["Year"]!="MULTIPLE" else ""}')
     src = opd.Source(row["SourceName"], state=row["State"])    # Create source for agency
 
     is_use_of_force_table = "USE OF FORCE" in row['TableType']
@@ -103,9 +103,6 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
         df_table = df_table[df_table[fatal_col].isin(fatal_values)]
     elif len(c:=[x for x in injury_cols if x in df_table])>0:
         df_table = df_table[df_table[c[0]]=='FATAL']
-    elif include_unknown_fatal and opd.defs.columns.FIREARM_USED_OFFICER in df_table:
-        df_table = df_table[df_table[opd.defs.columns.FIREARM_USED_OFFICER]=='YES']
-        known_fatal = False
     else:
         if not include_unknown_fatal or is_use_of_force_table:
             continue

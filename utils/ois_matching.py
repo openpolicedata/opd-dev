@@ -430,7 +430,7 @@ def columns_for_duplicated_check(t, df_matches_raw):
         notin = ["officer", "narrative", "objectid", "incnum", 'text', ' hash', 
                  'firearm','longitude','latitude','rank', 'globalid','rin',
                  'description','force','ofc','sworn','emp','weapon','shots','reason',
-                 'perceived','armed']
+                 'perceived','armed','nature','level']
         if c not in ignore_cols and c not in keep_cols and \
             ("ID" in [x.upper() for x in split_words(c)] or c.lower().startswith("off") or \
              any([x in c.lower() for x in notin]) or c.lower().startswith('raw_')):
