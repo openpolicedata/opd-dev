@@ -1,3 +1,4 @@
+from itertools import product
 import math
 import numbers
 import openpolicedata as opd
@@ -7,13 +8,11 @@ from . import address_parser
 
 # Columns will be standardized below to use these names
 date_col = opd.defs.columns.DATE
-race_col = opd.defs.columns.RE_GROUP_SUBJECT
-gender_col = opd.defs.columns.GENDER_SUBJECT
-age_col = opd.defs.columns.AGE_SUBJECT
 agency_col = opd.defs.columns.AGENCY
 fatal_col = opd.defs.columns.FATAL_SUBJECT
 role_col = opd.defs.columns.SUBJECT_OR_OFFICER
 injury_cols = [opd.defs.columns.INJURY_SUBJECT, opd.defs.columns.INJURY_OFFICER_SUBJECT]
+zip_col = opd.defs.columns.ZIP_CODE
 
 # Race values will be standardized below to use these values
 race_vals = opd.defs.get_race_cats()
@@ -27,6 +26,41 @@ gender_vals = opd.defs.get_gender_cats()
 [gender_vals.pop(k) for k in ["MULTIPLE","OTHER","OTHER / UNKNOWN", "UNKNOWN", "UNSPECIFIED"] if k in gender_vals]
 gender_vals = gender_vals.values()
 
+
+def zipcode_isequal(df1, df2, loc1=None, loc2=None, count=None, iloc1=None, iloc2=None):
+    assert(count in [None,'all','any','none'] or isinstance(count, numbers.Number))
+    
+    if zip_col in df1 and zip_col in df2:
+        if loc1:
+            val1 = df1.loc[loc1, zip_col]
+        elif isinstance(iloc1, numbers.Number):
+            val1 = df1[zip_col].iloc[iloc1]
+        else:
+            val1 = df1[zip_col]
+        if loc2:
+            val2 = df2.loc[loc2, zip_col]
+        elif isinstance(iloc2, numbers.Number):
+            val2 = df2[zip_col].iloc[iloc2]
+        else:
+            val2 = df2[zip_col]
+
+        matches = val1==val2
+
+        is_series = isinstance(matches, pd.Series)
+        if is_series and count=='all':
+            return matches.all()
+        elif is_series and count=='any':
+            return matches.any()
+        elif count=='none':
+            if is_series:
+                return not matches.any()
+            else:
+                return not matches
+        elif isinstance(count, numbers.Number):
+            return matches.sum()==count
+
+        return matches
+    return False
 
 def split_words(string, case=None):
     # Split based on spaces, punctuation, and camel case
@@ -192,19 +226,33 @@ def find_date_matches(df_test, date_col, date):
     return df_matches
 
 
-def get_opd_race_col(df_matches):
-    return race_col if role_col not in df_matches else opd.defs.columns.RE_GROUP_OFFICER_SUBJECT 
+def get_race_col(df):
+    if opd.defs.columns.RE_GROUP_SUBJECT in df:
+        return opd.defs.columns.RE_GROUP_SUBJECT
+    elif opd.defs.columns.RE_GROUP_OFFICER_SUBJECT in df:
+        return opd.defs.columns.RE_GROUP_OFFICER_SUBJECT 
+    else:
+        return None
 
-def get_opd_gender_col(df_matches):
-    return gender_col if role_col not in df_matches else opd.defs.columns.GENDER_OFFICER_SUBJECT
+def get_gender_col(df):
+    if opd.defs.columns.GENDER_SUBJECT in df:
+        return opd.defs.columns.GENDER_SUBJECT
+    elif opd.defs.columns.GENDER_OFFICER_SUBJECT in df:
+        return opd.defs.columns.GENDER_OFFICER_SUBJECT 
+    else:
+        return None
 
-def get_opd_age_col(df_matches):
-    return age_col if role_col not in df_matches else opd.defs.columns.AGE_OFFICER_SUBJECT
-
-def not_equal(a,b):
-    # Only 1 is null or values are not equal
-    return (pd.isnull(a) != pd.isnull(b)) or \
-        (pd.notnull(a) and pd.notnull(b) and a!=b)
+def get_age_col(df):
+    if opd.defs.columns.AGE_RANGE_SUBJECT in df:
+        return opd.defs.columns.AGE_RANGE_SUBJECT
+    elif opd.defs.columns.AGE_RANGE_OFFICER_SUBJECT in df:
+        return opd.defs.columns.AGE_RANGE_OFFICER_SUBJECT
+    elif opd.defs.columns.AGE_SUBJECT in df:
+        return opd.defs.columns.AGE_SUBJECT
+    elif opd.defs.columns.AGE_OFFICER_SUBJECT in df:
+        return opd.defs.columns.AGE_OFFICER_SUBJECT
+    else:
+        return None
 
 def remove_officer_rows(df_test):
     # For columns with subject and officer data in separate rows, remove officer rows
@@ -213,84 +261,143 @@ def remove_officer_rows(df_test):
     return df_test
 
 
-def _compare_values(orig_val, db_val, idx,
-                    col, db_col, rcol, gcol, acol, race_only_col,
-                    df_matches, num_matches, is_unknown, is_match, is_diff_race,
+_p_age_range = re.compile(r'^(\d+)\-(\d+)$')
+def _compare_values(orig_val1, orig_val2, idx,
+                    col1, col2, rcol1, gcol1, acol1, race_only_val1, race_only_val2,
+                    is_unknown, is_match, is_diff_race,
                     allowed_replacements, check_race_only, inexact_age, max_age_diff,
-                    allow_race_diff):
-    if col==rcol:
-        # Check for comma-separated list
-        orig_val = orig_val.split(',')
-    else:
-        orig_val = [orig_val]
+                    allow_race_diff, delim1=',', delim2=','):
+    # When we reach here, orig_val has already been tested to not equal db_val
+    orig_val1 = orig_val1.split(delim1) if isinstance(orig_val1, str) and col1==rcol1 else [orig_val1]
+    orig_val2 = orig_val2.split(delim1) if isinstance(orig_val2, str) and col1==rcol1 else [orig_val2]
 
-    for val in orig_val:
-        if db_col in allowed_replacements and \
-            any([val in x and db_val in x for x in allowed_replacements[db_col]]):
+    is_age_range1 = col1==acol1 and "RANGE" in col1
+    is_age_range2 = col1==acol1 and "RANGE" in col2
+
+    unknown_vals = ["UNKNOWN",'UNSPECIFIED','OTHER','PENDING RELEASE']
+    other_found = False
+    not_equal_found = False
+    race_diff_found = False
+    for val1, val2 in product(orig_val1, orig_val2):
+        val1 = val1.strip() if isinstance(val1, str) else val1
+        val2 = val2.strip() if isinstance(val2, str) else val2
+        if is_age_range1 and is_age_range2:
+            raise NotImplementedError()
+        elif is_age_range1 or is_age_range2:
+            if pd.isnull(val1) and pd.isnull(val2):
+                return
+            elif pd.isnull(val1):
+                other_found = True
+            elif (is_age_range1 and (m:=_p_age_range.search(val1))) or \
+                 (is_age_range2 and (m:=_p_age_range.search(val2))):
+                if pd.isnull(val2):
+                    is_unknown[idx] = True  # db is unknown but val is not
+                    return
+                else:
+                    other_val = val2 if is_age_range1 else val1
+                    min_age = int(m.groups()[0])
+                    max_age = int(m.groups()[1])
+                    if min_age-max_age_diff <= other_val <= max_age+max_age_diff:
+                        return  # In range
+                    else:
+                        not_equal_found = True
+            else:
+                raise NotImplementedError()
+        elif (pd.isnull(val1) and pd.isnull(val2)) or val1==val2:
+            return # Values are equal
+        elif col2 in allowed_replacements and \
+            any([val1 in x and val2 in x for x in allowed_replacements[col2]]):
             # Allow values in allowed_replacements to be swapped
+            other_found = True
+        elif col1==rcol1 and check_race_only and \
+            (
+                (race_only_val1 and race_only_val1==val2) or \
+                (race_only_val2 and race_only_val2==val1) or \
+                (race_only_val1 and race_only_val2 and race_only_val1==race_only_val2)
+            ):
+            return  # Race-only value matches db
+        elif (pd.isnull(val2) or val2 in unknown_vals) and val1 not in unknown_vals:
+            is_unknown[idx] = True  # db is unknown but val is not
             return
-        elif col==rcol and check_race_only and race_only_col in df_matches and \
-            df_matches.loc[idx,race_only_col]==db_val:
-            num_matches[idx]+=1
-            return
-        elif (pd.isnull(db_val) or db_val in ["UNKNOWN",'UNSPECIFIED']) and \
-            val not in ["UNKNOWN",'UNSPECIFIED']:
-            is_unknown[idx] = True
-            return
-        elif col==acol and isinstance(db_val, numbers.Number) and isinstance(val, numbers.Number) and \
-            pd.notnull(db_val) and pd.notnull(val):
+        elif col1==acol1 and isinstance(val2, numbers.Number) and isinstance(val1, numbers.Number) and \
+            pd.notnull(val2) and pd.notnull(val1):
             if inexact_age:
                 # Allow year in df_match to be an estimate of the decade so 30 would be a match for any value from 30-39
-                is_match[idx] = val == math.floor(db_val/10)*10
+                is_match_cur = val1 == math.floor(val2/10)*10
             else:
-                is_match[idx] = abs(val - db_val)<=max_age_diff
-            return
-        elif col==rcol and val in race_vals and db_val in race_vals:
+                is_match_cur = abs(val1 - val2)<=max_age_diff
+            if is_match_cur:
+                is_match[idx] &= is_match_cur
+                return
+            not_equal_found = True
+        elif col1==rcol1 and val1 in race_vals and val2 in race_vals:
             if allow_race_diff:
-                is_diff_race[idx] = True
+                race_diff_found = True
             else:
-                is_match[idx] = False
-            return
-        elif col==rcol and (val.upper() in ["UNKNOWN",'UNSPECIFIED','OTHER','PENDING RELEASE'] or pd.isnull(val)):
-            return
-        elif col==gcol and val in gender_vals and db_val in gender_vals:
-            is_match[idx] = False
-            return
-        elif col==gcol and (val.upper() in ["UNKNOWN",'UNSPECIFIED','OTHER','PENDING RELEASE'] or pd.isnull(val)):
-            return
-        elif col==acol and pd.isnull(val) and pd.notnull(db_val):
-            return
-    else:
-        raise NotImplementedError(f"{col} not equal: OPD: {val} vs. {db_val}")
-
-
-def check_for_match(df_matches, row_match, max_age_diff=0, allowed_replacements=[],
-                    check_race_only=False, inexact_age=False, allow_race_diff=False):
-    is_unknown = pd.Series(False, index=df_matches.index)
-    is_diff_race = pd.Series(False, index=df_matches.index)
-    is_match = pd.Series(True, index=df_matches.index)
-    num_matches = pd.Series(0, index=df_matches.index)
-
-    race_only_col = opd.defs.columns.RACE_SUBJECT if role_col not in df_matches else opd.defs.columns.RACE_OFFICER_SUBJECT
-    rcol = get_opd_race_col(df_matches)
-    gcol = get_opd_gender_col(df_matches)
-    acol = get_opd_age_col(df_matches)
-
-    for col, db_col in zip([rcol, gcol, acol], [race_col, gender_col, age_col]):
-        if col not in df_matches:
-            continue
+                not_equal_found = True
+        elif col1 in [rcol1, gcol1] and (val1.upper() in unknown_vals or pd.isnull(val1)):
+            other_found = True
+        elif col1==gcol1 and val1 in gender_vals and val2 in gender_vals:
+            not_equal_found = True
+        elif col1==acol1 and pd.isnull(val1) and pd.notnull(val2):
+            other_found = True
+        else:
+            raise NotImplementedError()
         
-        for idx in df_matches.index:
-            if not_equal(df_matches.loc[idx, col], row_match[db_col]):
-                _compare_values(df_matches.loc[idx, col], row_match[db_col], idx,
-                    col, db_col, rcol, gcol, acol, race_only_col,
-                    df_matches, num_matches, is_unknown, is_match, is_diff_race,
-                    allowed_replacements, check_race_only, inexact_age, max_age_diff,
-                    allow_race_diff)
-            else:
-                num_matches[idx]+=1
+    if other_found:
+        pass
+    elif race_diff_found:
+        is_diff_race[idx] = True
+    elif not_equal_found:
+        is_match[idx] = False
+    else:
+        raise NotImplementedError(f"{col1} not equal: OPD: {val1} vs. {val2}")
+
+
+def check_for_match(df, row_match, 
+                    max_age_diff=0, allowed_replacements={},
+                    check_race_only=False, inexact_age=False, allow_race_diff=False,
+                    zip_match=False):
+    is_unknown = pd.Series(False, index=df.index)
+    is_diff_race = pd.Series(False, index=df.index)
+    is_match = pd.Series(True, index=df.index)
+
+    race_only_col_df = opd.defs.columns.RACE_SUBJECT if role_col not in df else opd.defs.columns.RACE_OFFICER_SUBJECT
+    rcol_df = get_race_col(df)
+    gcol_df = get_gender_col(df)
+    acol_df = get_age_col(df)
+
+    rcol_row = get_race_col(row_match)
+    gcol_row = get_gender_col(row_match)
+    acol_row = get_age_col(row_match)
+    race_only_col_row = opd.defs.columns.RACE_SUBJECT if role_col not in row_match else opd.defs.columns.RACE_OFFICER_SUBJECT
+
+    if len(set(allowed_replacements.keys()) - {'race','gender'})>0:
+        raise NotImplementedError("Replacements only implemented for race and gener currently")
+    if 'race' in allowed_replacements:
+        allowed_replacements = allowed_replacements.copy()
+        allowed_replacements[rcol_row] = allowed_replacements.pop('race')
+    if 'gender' in allowed_replacements:
+        allowed_replacements = allowed_replacements.copy()
+        allowed_replacements[gcol_row] = allowed_replacements.pop('gender')
+
+    for idx in df.index:
+        if zip_match:
+            if not (zipcode_isequal(df, row_match, loc1=idx)):
+                is_match[idx] = False
+        for col_df, col_row in zip([rcol_df, gcol_df, acol_df], [rcol_row, gcol_row, acol_row]):
+            if col_df not in df or col_row not in row_match:
+                continue
+        
+            _compare_values(df.loc[idx, col_df], row_match[col_row], idx,
+                col_df, col_row, rcol_df, gcol_df, acol_df, 
+                df.loc[idx, race_only_col_df] if race_only_col_df in df else None, 
+                row_match[race_only_col_row] if race_only_col_row in row_match else None,
+                is_unknown, is_match, is_diff_race,
+                allowed_replacements, check_race_only, inexact_age, max_age_diff,
+                allow_race_diff)
                 
-    return is_match, is_unknown, num_matches, is_diff_race
+    return is_match, is_unknown, is_diff_race
 
 def columns_for_duplicated_check(t, df_matches_raw):
     # Multiple cases may be due to multiple officers shooting. MPV data appears to be per person killed so need to removed duplicates
@@ -322,7 +429,8 @@ def columns_for_duplicated_check(t, df_matches_raw):
         # Remove potential record IDs
         notin = ["officer", "narrative", "objectid", "incnum", 'text', ' hash', 
                  'firearm','longitude','latitude','rank', 'globalid','rin',
-                 'description','force','ofc','sworn','emp','weapon','shots','reason']
+                 'description','force','ofc','sworn','emp','weapon','shots','reason',
+                 'perceived','armed']
         if c not in ignore_cols and c not in keep_cols and \
             ("ID" in [x.upper() for x in split_words(c)] or c.lower().startswith("off") or \
              any([x in c.lower() for x in notin]) or c.lower().startswith('raw_')):

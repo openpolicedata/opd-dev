@@ -3,6 +3,7 @@ import glob
 import numpy as np
 import pandas as pd
 import os
+import warnings
 
 def log(df, output_dir, base_name, keys=None, add_date=False, only_diffs=False):
     keys = keys if keys else df.columns
@@ -15,22 +16,26 @@ def log(df, output_dir, base_name, keys=None, add_date=False, only_diffs=False):
     if only_diffs:
         old_files = glob.glob(search)
         for f in old_files:
+            if len(df)==0:
+                break
             df_old = pd.read_csv(f, keep_default_na=False, na_values={'',np.nan})
 
+            date_cols_added = []
+            keys_use = keys.copy()
             for k in [x for x in keys if "DATE" in x.upper()]:
                 if k in df_old and k in df:
-                    if df[k].apply(lambda x: isinstance(x,pd.Period)).any():
-                        if df[k][0].freq == 'Y':
-                            df_old[k] = pd.to_datetime(df_old[k], format='%Y')
-                        else:
-                            raise NotImplementedError()
-                        df_old[k] = df_old[k].apply(lambda x: pd.Period(x,df[k][0].freq))
-                    else:
-                        df_old[k] = pd.to_datetime(df_old[k], format='ISO8601')
+                    date_cols_added.append(k+"_TMP")
+                    keys_use[[j for j,m in enumerate(keys_use) if m==k][0]] = date_cols_added[-1]
+                    # Format dates to ensure data types match
+                    df[date_cols_added[-1]] = pd.to_datetime(df[k], format='ISO8601').dt.strftime('%Y%m%d_%H%M%S')
+                    df_old[date_cols_added[-1]] = pd.to_datetime(df_old[k], format='ISO8601').dt.strftime('%Y%m%d_%H%M%S')
 
-            df_combo = pd.concat([df_old, df], ignore_index=True)
-            df_combo = df_combo.drop_duplicates(subset=[k for k in keys if k in df_combo])
-            df = df_combo.loc[len(df_old):]
+            with warnings.catch_warnings():
+                # Ignore warning about all-NA columns
+                warnings.simplefilter(action='ignore', category=FutureWarning)
+                df_combo = pd.concat([df_old, df], ignore_index=True)
+            df_combo = df_combo.drop_duplicates(subset=[k for k in keys_use if k in df_combo])
+            df = df_combo.loc[len(df_old):].drop(columns=date_cols_added)
 
     if len(df)==0:
         return

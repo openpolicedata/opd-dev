@@ -1,21 +1,23 @@
 import pandas as pd
-import numpy as np
 import os, sys
-import glob
 from hashlib import sha1
 from datetime import datetime
 file_loc = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(file_loc)  # Add current file directory to path
 from opddev.utils import address_parser
+from opddev.utils import agencyutils
 from opddev.utils import ois_matching
 from opddev.utils import opd_logger
-from opddev.utils.ois_matching import date_col, race_col, agency_col, fatal_col, gender_col, age_col, injury_cols
 import openpolicedata as opd
 import logging
 
-istart = 91
+istart = 98
 logging_level = logging.DEBUG
 include_unknown_fatal = True
+include_close_date_matching_zip = True
+allowed_replacements = {'race':[["HISPANIC/LATINO","INDIGENOUS"],["HISPANIC/LATINO","WHITE"],["HISPANIC/LATINO","BLACK"],
+                                ['ASIAN','ASIAN/PACIFIC ISLANDER']],
+                        'gender':[['TRANSGENDER','MALE'],['TRANSGENDER','FEMALE']]}
 
 opd.datasets.reload(r"..\opd-data\opd_source_table.csv")
 
@@ -38,8 +40,18 @@ mpv = opd.data.Table({"SourceName":"Mapping Policing Violence",
                       "TableType":opd.defs.TableType.SHOOTINGS}, 
                      mpv_raw,
                      opd.defs.MULTI)
-mpv.standardize(known_cols={agency_col:"agency_responsible"})
+mpv.standardize(known_cols={opd.defs.columns.AGENCY:"agency_responsible"})
 mpv = mpv.table
+
+date_col = opd.defs.columns.DATE
+mpv_race_col = ois_matching.get_race_col(mpv)
+mpv_gender_col = ois_matching.get_gender_col(mpv)
+mpv_age_col = ois_matching.get_age_col(mpv)
+agency_col = opd.defs.columns.AGENCY
+fatal_col = opd.defs.columns.FATAL_SUBJECT
+role_col = opd.defs.columns.SUBJECT_OR_OFFICER
+injury_cols = [opd.defs.columns.INJURY_SUBJECT, opd.defs.columns.INJURY_OFFICER_SUBJECT]
+zip_col = opd.defs.columns.ZIP_CODE
 
 # Assuming MPV not looking for OIS before this date
 min_date = mpv[date_col].min()
@@ -78,6 +90,9 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
         except:
             raise
     df_table = t.table
+    test_race_col = t.get_race_col()
+    test_gender_col = t.get_gender_col()
+    test_age_col = t.get_age_col()
 
     df_table = ois_matching.remove_officer_rows(df_table)
 
@@ -108,85 +123,22 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
     df_table = ois_matching.drop_duplicates(df_table, subset=test_cols)
 
     addr_col = address_parser.find_address_col(df_table)
-    if len(addr_col)==1:
-        addr_col = addr_col[0]
-        address_found = True
-    else:
-        address_found = False
+    addr_col = addr_col[0] if len(addr_col)>0 else None
 
     if row['Agency']==opd.defs.MULTI:
         agency_names = df_table[opd.defs.columns.AGENCY].unique()
     else:
         agency_names = [row['AgencyFull']]
 
-    agency_words = ['Area','Rapid','Transit', 'Police', 'Department','Crisis', "Sheriff", 
-                        'Township', 'Bureau', 'State', 'University', 'Public', 'Safety',
-                        'Housing']
-    agency_types = ['Area Rapid Transit Police Department','Police Department', 'Crisis Response Team', "Sheriff's Office", 
-                    'Township Police Department', "Sheriff's Department", "Sheriff's Dept.",
-                    'Police Bureau', 'State University Department of Public Safety',
-                    'Housing Authority Police Department','Marshal Service',
-                    'Drug Enforcement Administration','Probation Department']
-    agency_types = sorted(list(agency_types), key=len, reverse=True)  # Sort from longest to shortest
     for agency in agency_names:
         if row['Agency']==opd.defs.MULTI:
             df_test = df_table[df_table[opd.defs.columns.AGENCY]==agency].copy()
         else:
             df_test = df_table.copy()
 
-        types_in_agency = [x for x in agency_types if x in agency]
-        assert(len(types_in_agency)>0)  # TODO: Replace with non-error in the future
-        agency_partial = agency.replace(types_in_agency[0],'').strip()
-
-        agency_matches = (mpv[agency_col].str.lower().str.contains(agency_partial.lower()).fillna(False)) & \
-            (mpv['state']==opd.defs.states[row['State']])
-        if agency_matches.sum()==0:
-            logger.info(f"No MPV shootings found for {agency}")
-            
-        mpv_agency = mpv[agency_matches]
-
-        keep = []
-        for j, mpv_row in mpv_agency.iterrows():
-            if mpv_row[agency_col] != agency and \
-                mpv_row[agency_col] not in [agency_partial+" "+x for x in agency_types] and \
-                mpv_row[agency_col] != f"{agency_partial} {opd.defs.states[row['State']]} Police Department":
-            
-                # Agency can be a comma-separated list of multiple agencies
-                agencies_check = mpv_row[agency_col]
-                agencies_check = agencies_check[1:] if agencies_check[0]=='"' else agencies_check
-                agencies_check = agencies_check[:-1] if agencies_check[-1]=='"' else agencies_check
-                agencies_check = [y.strip() for y in agencies_check.split(',')]
-                
-                any_contains = False
-                words = ois_matching.split_words(agency_partial)
-                for a in agencies_check:
-                    b = 0
-                    for w in ois_matching.split_words(a):
-                        if w==words[b]:
-                            b+=1
-                            if b==len(words): # Match
-                                any_contains = True
-                                break
-                    else:
-                        continue
-
-                    if a.lower()==agency.lower() or a.lower()==agency_partial.lower() or (a.startswith(agency_partial+" ") and \
-                        any([a.replace(agency_partial+" ","").startswith(x) for x in agency_words])):
-                        break
-                    type_match = [x for x in agency_types if a.endswith(x)]
-                    if len(type_match)==0:
-                        continue
-                    stem = a.replace(type_match[0],"").strip()
-                    type_match_opd = [x for x in agency_types if agency.endswith(x)]
-                    if not (type_match[0]==type_match_opd[0] or stem==agency_partial) or \
-                        a.endswith(agency):
-                        break
-                else:
-                    if not any_contains or any([a.lower().startswith(agency_partial.lower()+" gardens") for a in agencies_check]):
-                        continue
-                    raise NotImplementedError(f"{agency} not found in {mpv_row[agency_col]}")
-            keep.append(j)
-        mpv_agency = mpv_agency.loc[keep]
+        agency_partial, agency_type = agencyutils.split(agency, row['State'], unknown_type='error')
+        mpv_agency = agencyutils.find_agency(agency, agency_partial, agency_type, row['State'], 
+                                             mpv, agency_col, 'state', logger=logger)
 
         subject_demo_correction = {}
         match_with_age_diff = {}
@@ -199,23 +151,20 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
 
             # Run ois_matching.check_for_match multiple times. Loosen requirements for a match each time
             args = [{}, {'max_age_diff':1,'check_race_only':True}, 
-                    {'allowed_replacements':
-                        {race_col:[["HISPANIC/LATINO","INDIGENOUS"],["HISPANIC/LATINO","WHITE"],['ASIAN','ASIAN/PACIFIC ISLANDER']]}},
-                    {'inexact_age':True}, {'max_age_diff':5}, {'allow_race_diff':True}]
+                    {'allowed_replacements':allowed_replacements},
+                    {'inexact_age':True}, {'max_age_diff':5}, {'allow_race_diff':True},{'max_age_diff':20, 'zip_match':True},
+                    {'max_age_diff':10, 'zip_match':True, 'allowed_replacements':allowed_replacements}]
             age_diff = pd.Series(False, index=df_matches.index)
             for a in args:
-                is_match, is_unknown, num_matches, is_diff_race = ois_matching.check_for_match(df_matches, row_match, **a)
+                is_match, is_unknown, is_diff_race = ois_matching.check_for_match(df_matches, row_match,**a)
                 if is_match.any():
-                    age_diff[is_match] = list(a.keys())==['max_age_diff']
+                    age_diff[is_match] = 'max_age_diff' in a.keys()
                     break
 
             if is_match.sum()==0:
-                if len(df_matches)==1:
-                    # if j in subject_demo_correction:
-                    #     raise NotImplementedError("Attempting demo correction twice")
-                    # subject_demo_correction[j] = df_matches.iloc[0]
-                    # df_test = df_test.drop(index=df_matches.index[0])
-                    # mpv_matched[j] = True
+                if len(df_matches)==1 or \
+                    ois_matching.zipcode_isequal(df_matches, row_match, count='none'):
+                    # (zip_col and zip_col and (df_matches[zip_col]!=row_match[zip_col]).all())
                     logger.warning(f"Match found for {row_match[date_col]} but demographics do not match")
                     continue
                 
@@ -224,7 +173,7 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
             if is_match.sum()>1:
                 throw = True
                 summary_col = [x for x in df_matches.columns if 'summary' in x.lower()]
-                if address_found:
+                if addr_col:
                     test_cols_reduced = test_cols.copy()
                     test_cols_reduced.remove(addr_col)
                     [test_cols_reduced.remove(x) for x in summary_col]
@@ -239,6 +188,10 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
                         throw = addr_match.sum()!=1
                         if not throw:
                             is_match = addr_match
+                elif ois_matching.zipcode_isequal(row_match, df_matches[is_match], count=1):
+                # elif zip_col and zip_col and (m:=row_match[zip_col]==df_matches[is_match][zip_col]).sum()==1:
+                    is_match.loc[is_match] = row_match[zip_col]==df_matches[is_match][zip_col]
+                    throw = False
                 if throw:
                     if len(summary_col)>0:
                         throw = not (df_matches[summary_col]==df_matches[summary_col].iloc[0]).all().all()
@@ -265,31 +218,46 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
             if mpv_matched[j]:
                 continue
             # Look for matches where dates differ
-            is_match, _, _, _ = ois_matching.check_for_match(df_test, row_match)
+            is_match, _, _ = ois_matching.check_for_match(df_test, row_match)
 
             if is_match.sum()>0:
                 df_matches = df_test[is_match]
                 if len(df_matches)>1:
                     date_close = ois_matching.in_date_range(df_matches[date_col], row_match[date_col], '3d')
-                    if address_found:
+                    if addr_col:
                         addr_match = ois_matching.street_match(row_match[mpv_addr], mpv_addr, df_matches[addr_col], notfound='error')
 
-                    if date_close.sum()==1 and (not address_found or addr_match[date_close].iloc[0]):
+                    if date_close.sum()==1 and (not addr_col or addr_match[date_close].iloc[0]):
                         df_test = df_test.drop(index=df_matches[date_close].index)
                         mpv_matched[j] = True
-                    elif not address_found and \
+                    elif not addr_col and \
                         ois_matching.in_date_range(df_matches[date_col], row_match[date_col], min_delta='9d').all():
                         continue
-                    elif address_found and (not addr_match.any() or \
+                    elif addr_col and (not addr_match.any() or \
                         ois_matching.in_date_range(df_matches[addr_match][date_col], row_match[date_col], min_delta='300d').all()):
                         continue
                     else:
                         raise NotImplementedError()
-                elif not address_found:
+                elif not addr_col:
                     if ois_matching.in_date_range(df_matches[date_col], row_match[date_col], '2d').iloc[0]:
                         df_test = df_test.drop(index=df_matches.index)
                         mpv_matched[j] = True
-                    elif ois_matching.in_date_range(df_matches[date_col],row_match[date_col], min_delta='50d').iloc[0]:
+                    elif ois_matching.in_date_range(df_matches[date_col], row_match[date_col], '11d').iloc[0]:
+                        if include_close_date_matching_zip and \
+                            ois_matching.zipcode_isequal(row_match, df_matches, iloc2=0):
+                            # row_match[zip_col]==df_matches[zip_col].iloc[0]:
+                            df_test = df_test.drop(index=df_matches.index)
+                            mpv_matched[j] = True
+                        elif include_close_date_matching_zip and \
+                            ois_matching.zipcode_isequal(row_match, df_matches, iloc2=0, count='none'):
+                            # zip_col and zip_col and df_matches.iloc[0][zip_col]!=row_match[zip_col]:
+                            continue
+                        else:
+                            raise NotImplementedError()
+                    elif ois_matching.in_date_range(df_matches[date_col],row_match[date_col], min_delta='30d').iloc[0]:
+                        continue
+                    elif ois_matching.zipcode_isequal(row_match, df_matches, iloc2=0, count='none'):
+                    #zip_col and zip_col and df_matches.iloc[0][zip_col]!=row_match[zip_col]:
                         continue
                     else:
                         raise NotImplementedError()
@@ -315,13 +283,34 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
                 break
             
             mpv_unmatched = mpv_agency[~mpv_matched]
-            if not address_found and not ois_matching.in_date_range(df_test.iloc[j][date_col], mpv_unmatched[date_col], '9d').any():
-                j+=1
-                continue
-            elif not address_found and isinstance(df_test.iloc[j][date_col], pd.Period):
-                j+=1
-                continue
-            elif not address_found:
+            if not addr_col:
+                date_close = ois_matching.in_date_range(df_test.iloc[j][date_col], mpv_unmatched[date_col], '5d')
+                if not date_close.any():
+                    j+=1
+                    continue
+                if isinstance(df_test.iloc[j][date_col], pd.Period):
+                    j+=1
+                    continue
+                
+                date_diff = abs(mpv_unmatched[date_close][date_col] - df_test.iloc[j][date_col])
+                if zip_col in mpv_unmatched and zip_col in df_test:
+                    if not (zip_matches:=mpv_unmatched[date_close][zip_col]==df_test.iloc[j][zip_col]).any():
+                        j+=1  # No zip codes match
+                        continue
+                    if (m:=(date_diff[zip_matches]<='4d')).any():  # Zip codes do match
+                        is_match, _, _ = ois_matching.check_for_match(
+                            mpv_unmatched[date_close][zip_matches][m], df_test.iloc[j], 
+                            max_age_diff=5, allowed_replacements=allowed_replacements)
+                        if is_match.sum()==1:
+                            match_with_age_diff[is_match[is_match].index[0]] = df_test.iloc[j]
+                            df_test = df_test.drop(index=df_test.index[j])
+                            mpv_matched[is_match[is_match].index[0]] = True
+                            continue
+                        elif test_gender_col in df_test and df_test.iloc[j][test_gender_col]=='FEMALE' and \
+                            (mpv_unmatched[date_close][mpv_gender_col]=="MALE").all():
+                            j+=1
+                            continue
+
                 raise NotImplementedError()
 
             matches = ois_matching.street_match(df_test.iloc[j][addr_col], addr_col, mpv_unmatched[mpv_addr], notfound='error')
@@ -340,13 +329,10 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
                     mpv_matched[date_close] = True
                 elif (ois_matching.in_date_range(df_test.iloc[j][date_col], mpv_unmatched[matches][date_col], '150d')).any() and \
                     (len(mpv_unmatched[matches])>1 or address_parser.tag(mpv_unmatched[mpv_addr][matches].iloc[0], mpv_addr)[1]!='Coordinates'):
-                    rcol = ois_matching.get_opd_race_col(df_test)
-                    gcol = ois_matching.get_opd_gender_col(df_test)
-                    acol = ois_matching.get_opd_age_col(df_test)
                     match_sum = \
-                        (mpv_unmatched[matches>0][race_col] == df_test.iloc[j][rcol]).apply(lambda x: 1 if x else 0) + \
-                        (mpv_unmatched[matches>0][age_col] == df_test.iloc[j][acol]).apply(lambda x: 1 if x else 0) + \
-                        (mpv_unmatched[matches>0][gender_col] == df_test.iloc[j][gcol]).apply(lambda x: 1 if x else 0)
+                        (mpv_unmatched[matches>0][mpv_race_col] == df_test.iloc[j][test_race_col]).apply(lambda x: 1 if x else 0) + \
+                        (mpv_unmatched[matches>0][mpv_age_col] == df_test.iloc[j][test_age_col]).apply(lambda x: 1 if x else 0) + \
+                        (mpv_unmatched[matches>0][mpv_gender_col] == df_test.iloc[j][test_gender_col]).apply(lambda x: 1 if x else 0)
                     if mpv_unmatched[matches>0]['officer_names'].notnull().any():
                         raise NotImplementedError("Check this")
                     elif (abs(df_test.iloc[j][date_col]-mpv_unmatched[matches>0][date_col])<'30d').any():
@@ -371,9 +357,9 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
             df["MPV Row"] = df.index
             df["MPV ID"] = mpv_agency.loc[df.index]['mpv_id']
             df["MPV DATE"] = mpv_agency.loc[df.index][date_col]
-            df["MPV RACE"] = mpv_agency.loc[df.index][race_col]
-            df["MPV GENDER"] = mpv_agency.loc[df.index][gender_col]
-            df["MPV AGE"] = mpv_agency.loc[df.index][age_col]
+            df["MPV RACE"] = mpv_agency.loc[df.index][mpv_race_col]
+            df["MPV GENDER"] = mpv_agency.loc[df.index][mpv_gender_col]
+            df["MPV AGE"] = mpv_agency.loc[df.index][mpv_age_col]
             df["MPV AGENCY"] = mpv_agency.loc[df.index][agency_col]
             df["MPV ADDRESS"] = mpv_agency.loc[df.index][mpv_addr]
             df_save.append(df)
@@ -389,9 +375,9 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
             df["MPV Row"] = df.index
             df["MPV ID"] = mpv_agency.loc[df.index]['mpv_id']
             df["MPV DATE"] = mpv_agency.loc[df.index][date_col]
-            df["MPV RACE"] = mpv_agency.loc[df.index][race_col]
-            df["MPV GENDER"] = mpv_agency.loc[df.index][gender_col]
-            df["MPV AGE"] = mpv_agency.loc[df.index][age_col]
+            df["MPV RACE"] = mpv_agency.loc[df.index][mpv_race_col]
+            df["MPV GENDER"] = mpv_agency.loc[df.index][mpv_gender_col]
+            df["MPV AGE"] = mpv_agency.loc[df.index][mpv_age_col]
             df["MPV AGENCY"] = mpv_agency.loc[df.index][agency_col]
             df["MPV ADDRESS"] = mpv_agency.loc[df.index][mpv_addr]
             df_save.append(df)
@@ -403,13 +389,13 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
             df_save['known_fatal'] = known_fatal
 
             keys = ["MPV ID", 'type', 'known_fatal', 'Agency', date_col]
-            if ois_matching.get_opd_race_col(df_save) in df_save:
-                keys.append(ois_matching.get_opd_race_col(df_save))
-            if ois_matching.get_opd_gender_col(df_save) in df_save:
-                keys.append(ois_matching.get_opd_gender_col(df_save))
-            if ois_matching.get_opd_age_col(df_save) in df_save:
-                keys.append(ois_matching.get_opd_age_col(df_save))
-            if address_found:
+            if test_race_col  in df_save:
+                keys.append(test_race_col )
+            if test_gender_col in df_save:
+                keys.append(test_gender_col)
+            if test_age_col  in df_save:
+                keys.append(test_age_col )
+            if addr_col:
                 keys.append(addr_col)
 
             new_cols = ['type', 'known_fatal', 'Agency']
@@ -423,43 +409,6 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
             source_basename = f"{row['SourceName']}_{row['State']}_{row['TableType']}_{row['Year']}"
             opd_logger.log(df_save, output_dir, source_basename, keys=keys, add_date=True, only_diffs=True)
 
-            # old_files = glob.glob(out_filename.replace(".csv","*"))
-            # for f in old_files:
-            #     df_old = pd.read_csv(f, keep_default_na=False,
-            #                         na_values={'',np.nan})#.convert_dtypes()
-            #     if 'MPV DATE' in df_old:
-            #         df_old['MPV DATE'] = pd.to_datetime(df_old['MPV DATE'])
-            #     if df_save[date_col].apply(lambda x: isinstance(x,pd.Period)).any():
-            #         if df_save[date_col][0].freq == 'Y':
-            #             df_old[date_col] = pd.to_datetime(df_old[date_col], format='%Y')
-            #         else:
-            #             raise NotImplementedError()
-            #         df_old[date_col] = df_old[date_col].apply(lambda x: pd.Period(x,df_save[date_col][0].freq))
-            #     else:
-            #         df_old[date_col] = pd.to_datetime(df_old[date_col])
-            #     if 'TIME' in df_old:
-            #         df_old['TIME'] = pd.to_datetime(df_old['TIME'],format= '%H:%M:%S' ).dt.time
-            #         df_old['DATETIME'] = pd.to_datetime(df_old['DATETIME'])
-            #     try:
-            #         df_old['MPV Download Date'] = pd.to_datetime(df_old['MPV Download Date'],format=r'%Y%m%d')
-            #     except:
-            #         df_old['MPV Download Date'] = pd.to_datetime(df_old['MPV Download Date'])                
-            #     assert len(df_old)==len(df_save)
-            #     is_equal = True
-            #     df_old = df_old.sort_values(by=date_col, ignore_index=True)
-            #     df_save = df_save.sort_values(by=date_col, ignore_index=True)
-            #     for c in [date_col]:  # Assuming that it's sufficient to check dates for matches
-            #         if c not in df_old or 'objectid' in c.lower() or c in ['OPD Hash']:
-            #             continue
-            #         if not df_old[c].equals(df_save[c]) and \
-            #             not ((df_old[c]==df_save[c]) | (df_old[c].isnull() & df_save[c].isnull())).all() and \
-            #             not (df_old[c].apply(str)==df_save[c].apply(str)).all():
-            #             raise NotImplementedError("Check this!")
-
-            #     os.remove(f)
-
-            # df_save.to_csv(out_filename, index=False)
-
             cols = ['type', 'known_fatal']
             for c in df_save.columns:
                 if c.startswith("MPV"):
@@ -469,31 +418,16 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
             df_global["OPD Date"] = df_save[date_col]
             df_global["OPD Agency"] = df_save['Agency']
 
-            if ois_matching.get_opd_race_col(df_save) in df_save:
-                df_global["OPD Race"] = df_save[ois_matching.get_opd_race_col(df_save)]
-            if ois_matching.get_opd_gender_col(df_save) in df_save:
-                df_global["OPD Gender"] = df_save[ois_matching.get_opd_gender_col(df_save)]
-            if ois_matching.get_opd_age_col(df_save) in df_save:
-                df_global["OPD Age"] = df_save[ois_matching.get_opd_age_col(df_save)]
-            if address_found:
+            if test_race_col  in df_save:
+                df_global["OPD Race"] = df_save[test_race_col ]
+            if test_gender_col in df_save:
+                df_global["OPD Gender"] = df_save[test_gender_col]
+            if test_age_col  in df_save:
+                df_global["OPD Age"] = df_save[test_age_col ]
+            if addr_col:
                 df_global["OPD Address"] = df_save[addr_col]
 
             # CSV file containing all recommended updates with a limited set of columns
             global_basename = 'Potential_MPV_Updates_Global'
             keys = ["MPV ID", 'type', 'known_fatal', 'OPD Date','OPD Agency','OPD Race', 'OPD Gender','OPD Age','OPD Address']
             opd_logger.log(df_global, output_dir, global_basename, keys=keys, add_date=True, only_diffs=True)
-
-            # if os.path.exists(out_filename):
-            #     df = pd.read_csv(out_filename)
-            #     if (df['OPD Agency']==agency).any():
-            #         df_check = df[df['OPD Agency']==agency]
-            #         if df_save['OPD Hash'].isin(df_check['OPD Hash']).all():
-            #             continue
-            #         else:
-            #             raise NotImplementedError()
-            #     else:
-            #         df = pd.concat([df, df_save[first_cols]], ignore_index=True)
-            # else:
-            #     df = df_save[first_cols]
-
-            # df.to_csv(out_filename, index=False)
