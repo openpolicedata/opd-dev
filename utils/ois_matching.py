@@ -303,7 +303,8 @@ def _compare_values(orig_val1, orig_val2, idx,
                         not_equal_found = True
             else:
                 raise NotImplementedError()
-        elif (pd.isnull(val1) and pd.isnull(val2)) or val1==val2:
+        elif (pd.isnull(val1) and pd.isnull(val2)) or \
+            (pd.notnull(val1) and pd.notnull(val2) and val1==val2):
             return # Values are equal
         elif col2 in allowed_replacements and \
             any([val1 in x and val2 in x for x in allowed_replacements[col2]]):

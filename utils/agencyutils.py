@@ -10,7 +10,7 @@ agency_types = ['Area Rapid Transit Police Department','Police Department', 'Cri
                 'Police Bureau', 'State University Department of Public Safety',
                 'Housing Authority Police Department','Marshal Service',
                 'Drug Enforcement Administration','Probation Department','Highway Patrol',
-                "District Attorney's Office"]
+                "District Attorney's Office", 'State Police']
 agency_types = sorted(list(agency_types), key=len, reverse=True)  # Sort from longest to shortest
 
 def state_equals(s1, s2):

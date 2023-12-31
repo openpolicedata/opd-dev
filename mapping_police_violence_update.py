@@ -66,7 +66,7 @@ df_ois = pd.concat(df_ois, ignore_index=True)
 
 logger.debug(f"{len(df_ois)} datasets found")
 for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
-    logger.debug(f'Running {k+1} of {len(df_ois)}: {row["SourceName"]} {row["TableType"]} {row["Year"] if row["Year"]!="MULTIPLE" else ""}')
+    logger.debug(f'Running {k} of {len(df_ois)-1}: {row["SourceName"]} {row["TableType"]} {row["Year"] if row["Year"]!="MULTIPLE" else ""}')
     src = opd.Source(row["SourceName"], state=row["State"])    # Create source for agency
 
     is_use_of_force_table = "USE OF FORCE" in row['TableType']
@@ -420,7 +420,7 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
             if test_gender_col in df_save:
                 df_global["OPD Gender"] = df_save[test_gender_col]
             if test_age_col  in df_save:
-                df_global["OPD Age"] = df_save[test_age_col ]
+                df_global["OPD Age"] = df_save[test_age_col]
             if addr_col:
                 df_global["OPD Address"] = df_save[addr_col]
 
