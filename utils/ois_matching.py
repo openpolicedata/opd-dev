@@ -1,4 +1,5 @@
 from itertools import product
+import logging
 import math
 import numbers
 import openpolicedata as opd
@@ -449,6 +450,33 @@ def match_street_word(x,y):
                 m.group(1)==n.group(1)
     return match
 
+def address_match(address1, address2, keys1=None, keys2=None, match_null=False):
+    if pd.isnull(address1):
+        return match_null
+    if isinstance(address1,str):
+        keys1 = ['key']
+        address1 = {keys1[0]:address1}
+    if pd.isnull(address2):
+        return match_null
+    if isinstance(address2,str):
+        keys2 = ['key']
+        address2 = {keys2[0]:address2}
+    elif isinstance(address2,dict) and not keys2:
+        return True
+    for k1 in keys1:
+        words1 = split_words(address1[k1].lower())
+        for k2 in keys2:
+            words2 = split_words(address2[k2].lower())
+            for j,w in enumerate(words2[:len(words2)+1-len(words1)]):   # Indexing is to ensure that remaining words can be matched
+                if match_street_word(w, words1[0]):
+                    # Check that rest of word matches
+                    for m in range(1, len(words1)):
+                        if not match_street_word(words1[m], words2[j+m]):
+                            break
+                    else:
+                        return True
+    return False
+
 def street_match(address, col_name, col, notfound='ignore', match_addr_null=False, match_col_null=True):
     addr_tags, addr_type = address_parser.tag(address, col_name)
 
@@ -459,42 +487,36 @@ def street_match(address, col_name, col, notfound='ignore', match_addr_null=Fals
         return matches
     keys_check1 = [x for x in addr_tags.keys() if x.endswith('StreetName')]
     if len(keys_check1)==0:
-        if notfound=='error' and addr_type!='Coordinates':
+        if notfound=='error' and addr_type not in ['Coordinates','PlusCode','County']:
             raise ValueError(f"'StreetName' not found in {address}")
         else:
             return pd.Series(match_addr_null, index=col.index, dtype='object')
     for idx in col.index:
+        if not address_match(addr_tags, col[idx], keys1=keys_check1, match_null=match_col_null):
+            continue
         ctags_all, ctype_all = address_parser.tag(col[idx], col.name)
         if not isinstance(ctags_all, list):
             ctags_all = [ctags_all]
             ctype_all = [ctype_all]
         for ctags, ctype in zip(ctags_all, ctype_all):
             keys_check2 = [x for x in ctags.keys() if x.endswith('StreetName')]
-            if ctype in ['Null','Coordinates']:
+            if ctype in ['Null','Coordinates','Building','PlusCode']:
                 if match_col_null:
                     matches[idx] = True
                 continue
             if notfound=='error' and len(keys_check2)==0:
                 raise ValueError(f"'StreetName' not found in {col[idx]}")
 
-            for k1 in keys_check1:
-                words1 = split_words(addr_tags[k1].lower())
-                for k2 in keys_check2:
-                    words2 = split_words(ctags[k2].lower())
-                    for j,w in enumerate(words2[:len(words2)+1-len(words2)]):   # Indexing is to ensure that remaining words can be matched
-                        if match_street_word(w, words1[0]):
-                            # Check that rest of word matches
-                            for l in range(1, len(words1)):
-                                if not match_street_word(words1[l], words2[j+l]):
-                                    break
-                            else:
-                                matches[idx] = True
-                                break
-                    if matches[idx]:
-                        break
-                if matches[idx]:
-                    break
+            matches[idx] = address_match(addr_tags, ctags, keys1=keys_check1, keys2=keys_check2, match_null=match_col_null)
             if matches[idx]:
                 break
 
     return matches
+
+def get_logger(level):
+    logger = logging.getLogger("ois")
+    logger.setLevel(level)
+    ch = logging.StreamHandler()
+    ch.setLevel(level)
+    logger.addHandler(ch)
+    return logger

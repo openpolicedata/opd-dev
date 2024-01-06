@@ -71,7 +71,10 @@ def split(agency, state, unknown_type='ignore'):
 
     return agency_partial, types_in_agency[0]
 
-def find_agency(agency, agency_partial, agency_type, state, df, agency_col, state_col, 
+def filter_state(df, state_col, state):
+    return df[df[state_col].apply(state_equals, args=(state,))]
+
+def filter_agency(agency, agency_partial, agency_type, state, df, agency_col, state_col, 
                 delim=',', exact=False, logger=None):
 
     agency = agency.lower().strip().replace("&", 'and')

@@ -11,28 +11,31 @@ from opddev.utils import opd_logger
 import openpolicedata as opd
 import logging
 
-istart = 0
-logging_level = logging.DEBUG
-include_unknown_fatal = True
-include_close_date_matching_zip = True
+min_date = None   # Cases will be ignored before this date. If None, min_date will be set to the oldest date in MPV's data
+include_unknown_fatal = False  # Whether to include cases where there was a shooting but it is unknown if it was fatal 
+log_demo_diffs = False  # Whether to log cases where a likely match between MPV and OPD cases were found but listed race or gender differs
+log_age_diffs = False  # Whether to log cases where a likely match between MPV and OPD cases were found but age differs
+# Whether to keep cases that are marked self-inflicted in the data
+keep_self_inflicted = False
+
+istart = 0  # 1-based index (same as log statements) to start at in OPD datasets. Can be useful for restarting. Set to 0 to start from beginning.
+logging_level = logging.INFO  # Logging level. Change to DEBUG for some additional messaging.
+
+# If a perfect demographics match is not found, an attempt can be made to allow differences in race and gender values
+# when trying to find a case with matching demographics. These cases have been identified based on observed cases.
 allowed_replacements = {'race':[["HISPANIC/LATINO","INDIGENOUS"],["HISPANIC/LATINO","WHITE"],["HISPANIC/LATINO","BLACK"],
                                 ['ASIAN','ASIAN/PACIFIC ISLANDER']],
                         'gender':[['TRANSGENDER','MALE'],['TRANSGENDER','FEMALE']]}
-
-opd.datasets.reload(r"..\opd-data\opd_source_table.csv")
-
+    
 mpv_folder = os.path.join(file_loc, r"data\MappingPoliceViolence")
 output_dir = os.path.join(mpv_folder, "Updates")
-mpv_csv_filename = "Mapping Police Violence_Accessed20231111.csv"
+mpv_csv_filename = "Mapping Police Violence_Accessed20240101.csv"
 mpv_download_date = datetime.strptime(mpv_csv_filename[-4-8:-4], '%Y%m%d')
 mpv_addr = "street_address"
+mpv_state_col = 'state'
 mpv_raw = pd.read_csv(os.path.join(mpv_folder, mpv_csv_filename))
 
-logger = logging.getLogger("ois")
-logger.setLevel(logging.DEBUG)
-ch = logging.StreamHandler()
-ch.setLevel(logging.DEBUG)
-logger.addHandler(ch)
+logger = ois_matching.get_logger(logging_level)
 
 # Convert to OPD table so that standardization can be applied to so that terms for race and gender match OPD-loaded tables
 mpv = opd.data.Table({"SourceName":"Mapping Police Violence", 
@@ -53,8 +56,7 @@ role_col = opd.defs.columns.SUBJECT_OR_OFFICER
 injury_cols = [opd.defs.columns.INJURY_SUBJECT, opd.defs.columns.INJURY_OFFICER_SUBJECT]
 zip_col = opd.defs.columns.ZIP_CODE
 
-# Assuming MPV not looking for OIS before this date
-min_date = mpv[date_col].min()
+min_date = pd.to_datetime(min_date) if min_date else mpv[date_col].min()
 
 # Get a list of officer-involved shootings and use of force tables
 tables_to_use = [opd.defs.TableType.SHOOTINGS, opd.defs.TableType.SHOOTINGS_INCIDENTS,
@@ -64,9 +66,9 @@ for t in tables_to_use:
     df_ois.append(opd.datasets.query(table_type=t))
 df_ois = pd.concat(df_ois, ignore_index=True)
 
-logger.debug(f"{len(df_ois)} datasets found")
-for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
-    logger.debug(f'Running {k} of {len(df_ois)-1}: {row["SourceName"]} {row["TableType"]} {row["Year"] if row["Year"]!="MULTIPLE" else ""}')
+logger.info(f"{len(df_ois)} datasets found")
+for k, row in df_ois.iloc[max(1,istart)-1:].iterrows():  # Loop over OPD OIS datasets
+    logger.info(f'Running {k+1} of {len(df_ois)}: {row["SourceName"]} {row["TableType"]} {row["Year"] if row["Year"]!="MULTIPLE" else ""}')
     src = opd.Source(row["SourceName"], state=row["State"])    # Create source for agency
 
     is_use_of_force_table = "USE OF FORCE" in row['TableType']
@@ -98,8 +100,12 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
 
     is_multi_subject = False
     known_fatal = True
+    selfinflicted_is_logged = False
     if fatal_col in df_table:
-        fatal_values = ['YES',"UNSPECIFIED",'SELF-INFLICTED FATAL'] if include_unknown_fatal and not is_use_of_force_table else ['YES','SELF-INFLICTED FATAL']
+        fatal_values = ['YES',"UNSPECIFIED"] if include_unknown_fatal and not is_use_of_force_table else ['YES']
+        if keep_self_inflicted:
+            fatal_values.append('SELF-INFLICTED FATAL')
+        selfinflicted_is_logged = (df_table[fatal_col]=='SELF-INFLICTED FATAL').any()
         df_table = df_table[df_table[fatal_col].isin(fatal_values)]
     elif len(c:=[x for x in injury_cols if x in df_table])>0:
         df_table = df_table[df_table[c[0]]=='FATAL']
@@ -134,8 +140,8 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
             df_test = df_table.copy()
 
         agency_partial, agency_type = agencyutils.split(agency, row['State'], unknown_type='error')
-        mpv_agency = agencyutils.find_agency(agency, agency_partial, agency_type, row['State'], 
-                                             mpv, agency_col, 'state', logger=logger)
+        mpv_agency = agencyutils.filter_agency(agency, agency_partial, agency_type, row['State'], 
+                                             mpv, agency_col, mpv_state_col, logger=logger)
 
         subject_demo_correction = {}
         match_with_age_diff = {}
@@ -161,8 +167,7 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
             if is_match.sum()==0:
                 if len(df_matches)==1 or \
                     ois_matching.zipcode_isequal(df_matches, row_match, count='none'):
-                    # (zip_col and zip_col and (df_matches[zip_col]!=row_match[zip_col]).all())
-                    logger.warning(f"Match found for {row_match[date_col]} but demographics do not match")
+                    logger.debug(f"Matching date found in OPD for {row_match[date_col]} but demographics do not match")
                     continue
                 
                 raise NotImplementedError()
@@ -240,13 +245,11 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
                         df_test = df_test.drop(index=df_matches.index)
                         mpv_matched[j] = True
                     elif ois_matching.in_date_range(df_matches[date_col], row_match[date_col], '11d').iloc[0]:
-                        if include_close_date_matching_zip and \
-                            ois_matching.zipcode_isequal(row_match, df_matches, iloc2=0):
+                        if ois_matching.zipcode_isequal(row_match, df_matches, iloc2=0):
                             # row_match[zip_col]==df_matches[zip_col].iloc[0]:
                             df_test = df_test.drop(index=df_matches.index)
                             mpv_matched[j] = True
-                        elif include_close_date_matching_zip and \
-                            ois_matching.zipcode_isequal(row_match, df_matches, iloc2=0, count='none'):
+                        elif ois_matching.zipcode_isequal(row_match, df_matches, iloc2=0, count='none'):
                             # zip_col and zip_col and df_matches.iloc[0][zip_col]!=row_match[zip_col]:
                             continue
                         else:
@@ -259,7 +262,7 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
                     else:
                         raise NotImplementedError()
                 else:
-                    date_close = ois_matching.in_date_range(df_matches[date_col], row_match[date_col], '2d').iloc[0]
+                    date_close = ois_matching.in_date_range(df_matches[date_col], row_match[date_col], '3d').iloc[0]
                     addr_match = ois_matching.street_match(row_match[mpv_addr], mpv_addr, df_matches[addr_col], notfound='error').iloc[0]
                     
                     if date_close and addr_match:
@@ -339,11 +342,35 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
 
             j+=1
 
+        if addr_col:
+            # Check for cases where shooting might be listed under another agency or MPV agency might be null
+            mpv_state = agencyutils.filter_state(mpv, mpv_state_col, row['State'])
+            # Remove cases that have already been checked
+            mpv_state = mpv_state.drop(index=mpv_agency.index)
+            j = 0
+            while j<len(df_test):
+                addr_match = ois_matching.street_match(df_test.iloc[j][addr_col], addr_col, mpv_state[mpv_addr], 
+                                                       notfound='error', match_col_null=False)
+                if addr_match.any() and \
+                    ois_matching.in_date_range(df_test.iloc[j][date_col], mpv_state[addr_match][date_col], '30d').any():
+                    if (m:=ois_matching.in_date_range(df_test.iloc[j][date_col], mpv_state[addr_match][date_col], '1d')).any():
+                        is_match, _, _ = ois_matching.check_for_match(mpv_state.loc[addr_match[addr_match][m].index], df_test.iloc[j])
+                        if is_match.any():
+                            df_test = df_test.drop(index=df_test.index[j])
+                            continue
+                        else:
+                            raise NotImplementedError()
+                    else:
+                        raise NotImplementedError()
+                    
+                j+=1
+
         df_save = []
         if len(df_test)>0:
             df_test['type'] = 'Unmatched'
             df_save.append(df_test)
-        if len(subject_demo_correction)>0:
+
+        if log_demo_diffs and len(subject_demo_correction)>0:
             df = pd.DataFrame(subject_demo_correction).transpose()
             df['type'] = 'Demo Correction?'
             # Create hash of MPV row
@@ -361,7 +388,7 @@ for k, row in df_ois.iloc[istart:].iterrows():  # Loop over OPD OIS datasets
             df["MPV ADDRESS"] = mpv_agency.loc[df.index][mpv_addr]
             df_save.append(df)
         
-        if len(match_with_age_diff)>0:
+        if log_age_diffs and len(match_with_age_diff)>0:
             df = pd.DataFrame(match_with_age_diff).transpose()
             df['type'] = 'Age Difference'
             # Create hash of MPV row

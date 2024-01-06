@@ -36,7 +36,10 @@ def log(df, output_dir, base_name, keys=None, add_date=False, only_diffs=False):
                     date_cols_added.append(k+"_TMP")
                     keys_use[[j for j,m in enumerate(keys_use) if m==k][0]] = date_cols_added[-1]
                     # Format dates to ensure data types match
-                    df[date_cols_added[-1]] = pd.to_datetime(df[k], format='ISO8601', utc=True).dt.strftime('%Y%m%d_%H%M%S')
+                    try:
+                        df[date_cols_added[-1]] = pd.to_datetime(df[k], format='ISO8601', utc=True).dt.strftime('%Y%m%d_%H%M%S')
+                    except:
+                        df[date_cols_added[-1]] = pd.to_datetime(df[k].dt.to_timestamp(), format='ISO8601', utc=True).dt.strftime('%Y%m%d_%H%M%S')
                     df_old[date_cols_added[-1]] = pd.to_datetime(df_old[k], format='ISO8601', utc=True).dt.strftime('%Y%m%d_%H%M%S')
 
             with warnings.catch_warnings():
