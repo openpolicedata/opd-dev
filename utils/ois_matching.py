@@ -401,13 +401,43 @@ def check_for_match(df, row_match,
                 
     return is_match, is_unknown, is_diff_race
 
-def columns_for_duplicated_check(t, df_matches_raw):
+
+def clean_data(opd_table, df_opd, table_type, injury_cols, fatal_col, min_date, include_unknown_fatal=False, keep_self_inflicted=False):
+    # For data containing separate rows for officers and subjects, remove officers
+    df_opd = remove_officer_rows(df_opd)
+
+    # Filter data for cases that were fatal
+    known_fatal = True
+    if fatal_col in df_opd:
+        fatal_values = ['YES',"UNSPECIFIED"] if include_unknown_fatal and "USE OF FORCE" not in table_type else ['YES']
+        if keep_self_inflicted:
+            fatal_values.append('SELF-INFLICTED FATAL')
+        df_opd = df_opd[df_opd[fatal_col].isin(fatal_values)]
+    elif len(c:=[x for x in injury_cols if x in df_opd])>0:
+        df_opd = df_opd[df_opd[c[0]]=='FATAL']
+    else:
+        if not include_unknown_fatal or "USE OF FORCE" in table_type:
+            return pd.DataFrame(columns=df_opd.columns), None, None
+        known_fatal = False
+
+    if len(df_opd)==0:
+        return df_opd, None, None  # No data move to the next dataset
+    
+    df_opd = filter_by_date(df_opd.copy(), date_col, min_date=min_date)
+
+    test_cols, ignore_cols = columns_for_duplicated_check(opd_table, df_opd)
+    df_opd = drop_duplicates(df_opd, subset=test_cols)
+
+    return df_opd, known_fatal, test_cols
+
+
+def columns_for_duplicated_check(opd_table, df_matches_raw):
     # Multiple cases may be due to multiple officers shooting. MPV data appears to be per person killed so need to removed duplicates
 
     # Start with null values that may only be missing in some records
     ignore_cols = df_matches_raw.columns[df_matches_raw.isnull().any()].tolist()
     keep_cols = []
-    for c in t.get_transform_map():
+    for c in opd_table.get_transform_map():
         # Looping over list of columns that were standardized which provides old and new column names
         if c.new_column_name==opd.defs.columns.INJURY_SUBJECT:
             # Same subject can have multiple injuries
@@ -520,3 +550,78 @@ def get_logger(level):
     ch.setLevel(level)
     logger.addHandler(ch)
     return logger
+
+
+def remove_matches_same_date(df_mpv_agency, df_opd, mpv_addr_col, addr_col, test_cols, allowed_replacements=[]):
+    logger = logging.getLogger("ois")
+    subject_demo_correction = {}
+    match_with_age_diff = {}
+    mpv_matched = pd.Series(False, df_mpv_agency.index)
+    for j, row_mpv in df_mpv_agency.iterrows():
+        df_matches = find_date_matches(df_opd, date_col, row_mpv[date_col])
+
+        if len(df_matches)==0:
+            continue
+
+        # Run check_for_match multiple times. Loosen requirements for a match each time
+        args = [{}, {'max_age_diff':1,'check_race_only':True}, 
+                {'allowed_replacements':allowed_replacements},
+                {'inexact_age':True}, {'max_age_diff':5}, {'allow_race_diff':True},{'max_age_diff':20, 'zip_match':True},
+                {'max_age_diff':10, 'zip_match':True, 'allowed_replacements':allowed_replacements}]
+        age_diff = pd.Series(False, index=df_matches.index)
+        for a in args:
+            is_match, is_unknown, is_diff_race = check_for_match(df_matches, row_mpv,**a)
+            if is_match.any():
+                age_diff[is_match] = 'max_age_diff' in a.keys()
+                break
+
+        if is_match.sum()==0:
+            if len(df_matches)==1 or \
+                zipcode_isequal(df_matches, row_mpv, count='none'):
+                logger.debug(f"Matching date found in OPD for {row_mpv[date_col]} but demographics do not match")
+                continue
+            
+            raise NotImplementedError()
+
+        if is_match.sum()>1:
+            throw = True
+            summary_col = [x for x in df_matches.columns if 'summary' in x.lower()]
+            if addr_col:
+                test_cols_reduced = test_cols.copy()
+                test_cols_reduced.remove(addr_col)
+                [test_cols_reduced.remove(x) for x in summary_col]
+                if len(drop_duplicates(df_matches[is_match], subset=test_cols_reduced, ignore_null=True, ignore_date_errors=True))==1:
+                    # These are the same except for the address. Check if the addresses are similar
+                    addr_match = street_match(df_matches[is_match][addr_col].iloc[0], addr_col, 
+                                                        df_matches[is_match][addr_col].iloc[1:], notfound='error')
+                    throw = not addr_match.all()
+                if throw:
+                    #Check if address only matches one case
+                    addr_match = street_match(row_mpv[mpv_addr_col], mpv_addr_col, df_matches[is_match][addr_col], notfound='error')
+                    throw = addr_match.sum()!=1
+                    if not throw:
+                        is_match = addr_match
+            elif zipcode_isequal(row_mpv, df_matches[is_match], count=1):
+            # elif zip_col and zip_col and (m:=row_match[zip_col]==df_matches[is_match][zip_col]).sum()==1:
+                is_match.loc[is_match] = row_mpv[zip_col]==df_matches[is_match][zip_col]
+                throw = False
+            if throw:
+                if len(summary_col)>0:
+                    throw = not (df_matches[summary_col]==df_matches[summary_col].iloc[0]).all().all()
+            if throw:
+                raise NotImplementedError("Multiple matches found")
+                
+        for idx in df_matches.index:
+            # OIS found in data. Remove from df_test.
+            if is_match[idx]: 
+                if is_unknown[idx] or is_diff_race[idx]:
+                    subject_demo_correction[j] = df_matches.loc[idx]
+                if age_diff[idx]:
+                    if j in match_with_age_diff:
+                        raise NotImplementedError("Attempting age diff id twice")
+                    match_with_age_diff[j] = df_matches.loc[idx]
+
+                df_opd = df_opd.drop(index=idx)
+                mpv_matched[j] = True
+
+    return df_opd, mpv_matched, subject_demo_correction, match_with_age_diff

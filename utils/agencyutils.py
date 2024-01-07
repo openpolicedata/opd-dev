@@ -119,5 +119,5 @@ def filter_agency(agency, agency_partial, agency_type, state, df, agency_col, st
             keep.append(j)
 
     if len(keep)==0 and logger:
-        logger.info(f"No MPV shootings found for {agency}")
+        logger.debug(f"No MPV shootings found for {agency}")
     return df_agency.loc[keep]
