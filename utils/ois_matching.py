@@ -6,6 +6,7 @@ import openpolicedata as opd
 import pandas as pd
 import re
 from . import address_parser
+from . import agencyutils
 
 # Columns will be standardized below to use these names
 date_col = opd.defs.columns.DATE
@@ -244,14 +245,14 @@ def get_gender_col(df):
         return None
 
 def get_age_col(df):
-    if opd.defs.columns.AGE_RANGE_SUBJECT in df:
-        return opd.defs.columns.AGE_RANGE_SUBJECT
-    elif opd.defs.columns.AGE_RANGE_OFFICER_SUBJECT in df:
-        return opd.defs.columns.AGE_RANGE_OFFICER_SUBJECT
-    elif opd.defs.columns.AGE_SUBJECT in df:
+    if opd.defs.columns.AGE_SUBJECT in df:
         return opd.defs.columns.AGE_SUBJECT
     elif opd.defs.columns.AGE_OFFICER_SUBJECT in df:
         return opd.defs.columns.AGE_OFFICER_SUBJECT
+    elif opd.defs.columns.AGE_RANGE_SUBJECT in df:
+        return opd.defs.columns.AGE_RANGE_SUBJECT
+    elif opd.defs.columns.AGE_RANGE_OFFICER_SUBJECT in df:
+        return opd.defs.columns.AGE_RANGE_OFFICER_SUBJECT
     else:
         return None
 
@@ -552,36 +553,23 @@ def get_logger(level):
     return logger
 
 
-def remove_matches_same_date(df_mpv_agency, df_opd, mpv_addr_col, addr_col, test_cols, allowed_replacements=[]):
+def remove_matches_date_match_first(df_mpv_agency, df_opd, mpv_addr_col, addr_col, 
+                             mpv_matched, subject_demo_correction, match_with_age_diff, args,
+                             test_cols):
     logger = logging.getLogger("ois")
-    subject_demo_correction = {}
-    match_with_age_diff = {}
-    mpv_matched = pd.Series(False, df_mpv_agency.index)
     for j, row_mpv in df_mpv_agency.iterrows():
         df_matches = find_date_matches(df_opd, date_col, row_mpv[date_col])
 
         if len(df_matches)==0:
             continue
 
-        # Run check_for_match multiple times. Loosen requirements for a match each time
-        args = [{}, {'max_age_diff':1,'check_race_only':True}, 
-                {'allowed_replacements':allowed_replacements},
-                {'inexact_age':True}, {'max_age_diff':5}, {'allow_race_diff':True},{'max_age_diff':20, 'zip_match':True},
-                {'max_age_diff':10, 'zip_match':True, 'allowed_replacements':allowed_replacements}]
         age_diff = pd.Series(False, index=df_matches.index)
-        for a in args:
-            is_match, is_unknown, is_diff_race = check_for_match(df_matches, row_mpv,**a)
-            if is_match.any():
-                age_diff[is_match] = 'max_age_diff' in a.keys()
-                break
-
-        if is_match.sum()==0:
-            if len(df_matches)==1 or \
-                zipcode_isequal(df_matches, row_mpv, count='none'):
-                logger.debug(f"Matching date found in OPD for {row_mpv[date_col]} but demographics do not match")
-                continue
-            
-            raise NotImplementedError()
+        is_match, is_unknown, is_diff_race = check_for_match(df_matches, row_mpv,**args)
+        if is_match.any():
+            age_diff[is_match] = 'max_age_diff' in args.keys()
+        else:
+            logger.debug(f"Matching date found in OPD for {row_mpv[date_col]} but demographics do not match")
+            continue
 
         if is_match.sum()>1:
             throw = True
@@ -625,3 +613,164 @@ def remove_matches_same_date(df_mpv_agency, df_opd, mpv_addr_col, addr_col, test
                 mpv_matched[j] = True
 
     return df_opd, mpv_matched, subject_demo_correction, match_with_age_diff
+
+
+def remove_matches_demographics_match_first(df_mpv_agency, df_opd, mpv_addr_col, addr_col, 
+                                            mpv_matched):
+    for j, row_match in df_mpv_agency.iterrows():
+        if len(df_opd)==0:
+            break
+        if mpv_matched[j]:
+            continue
+        # Look for matches where dates differ
+        is_match, _, _ = check_for_match(df_opd, row_match)
+
+        if is_match.sum()>0:
+            df_matches = df_opd[is_match]
+            if len(df_matches)>1:
+                date_close = in_date_range(df_matches[date_col], row_match[date_col], '3d')
+                if addr_col:
+                    addr_match = street_match(row_match[mpv_addr_col], mpv_addr_col, df_matches[addr_col], notfound='error')
+
+                if date_close.sum()==1 and (not addr_col or addr_match[date_close].iloc[0]):
+                    df_opd = df_opd.drop(index=df_matches[date_close].index)
+                    mpv_matched[j] = True
+                elif not addr_col and \
+                    in_date_range(df_matches[date_col], row_match[date_col], min_delta='9d').all():
+                    continue
+                elif addr_col and (not addr_match.any() or \
+                    in_date_range(df_matches[addr_match][date_col], row_match[date_col], min_delta='300d').all()):
+                    continue
+                else:
+                    raise NotImplementedError()
+            elif not addr_col:
+                if in_date_range(df_matches[date_col], row_match[date_col], '2d').iloc[0]:
+                    df_opd = df_opd.drop(index=df_matches.index)
+                    mpv_matched[j] = True
+                elif in_date_range(df_matches[date_col], row_match[date_col], '11d').iloc[0]:
+                    if zipcode_isequal(row_match, df_matches, iloc2=0):
+                        # row_match[zip_col]==df_matches[zip_col].iloc[0]:
+                        df_opd = df_opd.drop(index=df_matches.index)
+                        mpv_matched[j] = True
+                    elif zipcode_isequal(row_match, df_matches, iloc2=0, count='none'):
+                        # zip_col and zip_col and df_matches.iloc[0][zip_col]!=row_match[zip_col]:
+                        continue
+                    else:
+                        raise NotImplementedError()
+                elif in_date_range(df_matches[date_col],row_match[date_col], min_delta='30d').iloc[0]:
+                    continue
+                elif zipcode_isequal(row_match, df_matches, iloc2=0, count='none'):
+                #zip_col and zip_col and df_matches.iloc[0][zip_col]!=row_match[zip_col]:
+                    continue
+                else:
+                    raise NotImplementedError()
+            else:
+                date_close = in_date_range(df_matches[date_col], row_match[date_col], '3d').iloc[0]
+                addr_match = street_match(row_match[mpv_addr_col], mpv_addr_col, df_matches[addr_col], notfound='error').iloc[0]
+                
+                if date_close and addr_match:
+                    df_opd = df_opd.drop(index=df_opd[is_match].index)
+                    mpv_matched[j] = True
+                elif addr_match and in_date_range(df_matches[date_col], row_match[date_col], '31d', '30d').iloc[0]:
+                    # Likely error in the month that was recorded
+                    df_opd = df_opd.drop(index=df_opd[is_match].index)
+                    mpv_matched[j] = True
+                elif addr_match:
+                    raise NotImplementedError()
+                elif in_date_range(df_matches[date_col], row_match[date_col], '110d').iloc[0]:
+                    raise NotImplementedError()
+    return df_opd, mpv_matched
+
+
+def remove_matches_street_match_first(df_mpv_agency, df_opd, mpv_addr_col, addr_col,
+                                      mpv_matched, subject_demo_correction):
+    j = 0
+    while j<len(df_opd):
+        if len(df_mpv_agency)==0:
+            break
+        
+        mpv_unmatched = df_mpv_agency[~mpv_matched]
+
+        matches = street_match(df_opd.iloc[j][addr_col], addr_col, mpv_unmatched[mpv_addr_col], notfound='error')
+
+        if matches.any():
+            date_close = in_date_range(df_opd.iloc[j][date_col], mpv_unmatched[matches][date_col], '3d')
+            if date_close.any():
+                if date_close.sum()>1:
+                    raise NotImplementedError()
+                date_close = [k for k,x in date_close.items() if x][0]
+                # Consider this a match with errors in the demographics
+                if date_close in subject_demo_correction:
+                    raise NotImplementedError("Attempting demo correction twice")
+                subject_demo_correction[date_close] = df_opd.iloc[j]
+                df_opd = df_opd.drop(index=df_opd.index[j])
+                mpv_matched[date_close] = True
+                continue
+
+        j+=1
+    return df_opd, mpv_matched, subject_demo_correction
+
+
+def remove_matches_close_date_match_zipcode(df_mpv_agency, df_opd, mpv_matched, allowed_replacements, match_with_age_diff):
+    test_gender_col = get_gender_col(df_opd)
+    mpv_gender_col = get_gender_col(df_mpv_agency)
+
+    j = 0
+    while j<len(df_opd):
+        if len(df_mpv_agency)==0:
+            break
+        
+        mpv_unmatched = df_mpv_agency[~mpv_matched]
+
+        date_close = in_date_range(df_opd.iloc[j][date_col], mpv_unmatched[date_col], '5d')
+        if not date_close.any() or isinstance(df_opd.iloc[j][date_col], pd.Period):
+            j+=1
+            continue
+        
+        if zip_col in mpv_unmatched and zip_col in df_opd:
+            if not (zip_matches:=mpv_unmatched[date_close][zip_col]==df_opd.iloc[j][zip_col]).any():
+                j+=1  # No zip codes match
+                continue
+            date_diff = abs(mpv_unmatched[date_close][date_col] - df_opd.iloc[j][date_col])
+            if (m:=(date_diff[zip_matches]<='4d')).any():  # Zip codes do match
+                is_match, _, _ = check_for_match(
+                    mpv_unmatched[date_close][zip_matches][m], df_opd.iloc[j], 
+                    max_age_diff=5, allowed_replacements=allowed_replacements)
+                if is_match.sum()==1:
+                    match_with_age_diff[is_match[is_match].index[0]] = df_opd.iloc[j]
+                    df_opd = df_opd.drop(index=df_opd.index[j])
+                    mpv_matched[is_match[is_match].index[0]] = True
+                    continue
+                elif test_gender_col in df_opd and df_opd.iloc[j][test_gender_col]=='FEMALE' and \
+                    (mpv_unmatched[date_close][mpv_gender_col]=="MALE").all():
+                    j+=1
+                    continue
+
+        raise NotImplementedError()
+
+    return df_opd, mpv_matched, match_with_age_diff
+
+def remove_matches_agencymismatch(df_mpv, df_mpv_agency, df_opd, mpv_state_col, mpv_addr_col, addr_col, state):
+    # Check for cases where shooting might be listed under another agency or MPV agency might be null
+    mpv_state = agencyutils.filter_state(df_mpv, mpv_state_col, state)
+    # Remove cases that have already been checked
+    mpv_state = mpv_state.drop(index=df_mpv_agency.index)
+    j = 0
+    while j<len(df_opd):
+        addr_match = street_match(df_opd.iloc[j][addr_col], addr_col, mpv_state[mpv_addr_col], 
+                                                notfound='error', match_col_null=False)
+        if addr_match.any() and \
+            in_date_range(df_opd.iloc[j][date_col], mpv_state[addr_match][date_col], '30d').any():
+            if (m:=in_date_range(df_opd.iloc[j][date_col], mpv_state[addr_match][date_col], '1d')).any():
+                is_match, _, _ = check_for_match(mpv_state.loc[addr_match[addr_match][m].index], df_opd.iloc[j])
+                if is_match.any():
+                    df_opd = df_opd.drop(index=df_opd.index[j])
+                    continue
+                else:
+                    raise NotImplementedError()
+            else:
+                raise NotImplementedError()
+            
+        j+=1
+
+    return df_opd
