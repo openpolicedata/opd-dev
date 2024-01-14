@@ -1,3 +1,4 @@
+from typing import Optional
 import usaddress
 import json
 import pandas as pd
@@ -17,7 +18,23 @@ _states = list(states_dict.keys())
 for v in states_dict.values():
     _states.append(v)
 
-def find_address_col(df_test):
+def find_address_col(df_test: pd.DataFrame, error: str='ignore'):
+    """Find address or street column if it exists
+
+    Parameters
+    ----------
+    df_test : pd.DataFrame
+        Table to find column in 
+    error : str, optional
+        If 'raise', an exception will be thrown if an unexpected exception is thrown when trying to ID a column
+        If 'ignore', no exception will be thrown, the column that was running when the exception occurred will not be ID'ed as an address column 
+        , by default 'ignore'
+
+    Returns
+    -------
+    list[str]
+        List of address or street columns
+    """
     addr_col = [x for x in df_test.columns if "LOCATION" in x.upper()]
     for col in addr_col:
         try:
@@ -31,11 +48,15 @@ def find_address_col(df_test):
         except AttributeError as e:
             if len(e.args)>0 and e.args[0]=="'bool' object has no attribute 'strip'":
                 continue
-            else:
+            elif error=='ignore':
                 raise
+            else:
+                continue
         except:
-            # TODO: Replace with never produce an error
-            raise
+            if error=='ignore':
+                raise
+            else:
+                continue
         tags = tags[tags.apply(lambda x: isinstance(x[1],str) and x[1]!='Null')]
         if tags.apply(lambda x: x[1]).isin(['Street Address','Intersection','Block Address', 'Street Name', 
                                             'StreetDirectional', 'County', 'Building', 'Bridge']).all():
@@ -199,7 +220,7 @@ _street_match_w_addr = _opt_address_num+_street_match
 
 _hwy_types.append('us')
 _numeric_street_name = ReText(r'\d+[nsew]?', 'StreetName')
-_us_hwy = _opt_address_num+ReText([_hwy_types, '\s*', '(hwy)?'], 'StreetNamePreType')+_numeric_street_name
+_us_hwy = _opt_address_num+ReText([_hwy_types, r'\s*', '(hwy)?'], 'StreetNamePreType')+_numeric_street_name
 
 _and_str_block = ReText([['and',r'&']], 'BlockRangeSeparator')
 _opt_cross_street = ReText((_opt_street_dir+_street_name+_opt_post_type+_opt_post_dir).replace(r"(?P<StreetName", r"(?P<CrossStreetName"), opt=True)
@@ -212,7 +233,7 @@ _p_block2 = re.compile("^"+_opt_street_dir+_street_name+_opt_post_type+_opt_post
 _p_block3 = re.compile("^"+_block_num+_block_ind+_opt_street_dir+_street_name+_opt_post_type+_opt_post_dir+
                       _opt_place_line+_opt_near+_opt_cross_street+"$", re.IGNORECASE)
 
-_slash = ReText(r"\s*/\s*", 'BlockRangeSeparator',delims=[r'\s','\w'])
+_slash = ReText(r"\s*/\s*", 'BlockRangeSeparator',delims=[r'\s',r'\w'])
 _cross_street = ReText((_opt_street_dir+_street_name.add_delim("/")+_opt_post_type.add_delim("/")+_opt_post_dir.add_delim("/")).replace(r"(?P<StreetName", r"(?P<CrossStreetName"),
                        delims=[r'\s','/'])
 _p_block4 = re.compile("^"+_cross_street+_slash+
@@ -237,7 +258,7 @@ _opt_place_in_paren = ReText(r"(\("+ReText(r"[a-z \.\n\-]+",'PlaceName', delims=
 _p_intersection_hwy = re.compile("^"+_us_hwy+_and_str+
                              (_street_match_w_addr).ordinal(2)+
                              _opt_place_line+"$", re.IGNORECASE)
-_us_hwy = _opt_address_num+ReText([_hwy_types, '\s*', '(hwy)?'], 'StreetNamePreType')+_numeric_street_name
+_us_hwy = _opt_address_num+ReText([_hwy_types, r'\s*', '(hwy)?'], 'StreetNamePreType')+_numeric_street_name
 _p_intersection_hwy2 = re.compile("^"+_opt_pre_type+_numeric_street_name+_and_str+
                              (_opt_pre_type+_numeric_street_name).ordinal(2)+
                              _opt_place_line+"$", re.IGNORECASE)
@@ -282,7 +303,7 @@ _p_address3 = re.compile("^"+_opt_building_name+_opt_address_num+_opt_building_n
                         _opt_occupancy_type+_opt_occupancy_id+r",\s*"+
                         _opt_place3+_opt_zip+"$", re.IGNORECASE)
 
-_address_ambiguous = ReText("space [\da-z]+", 'Ambiguous')
+_address_ambiguous = ReText(r"space [\da-z]+", 'Ambiguous')
 _p_address_w_ambiguous = re.compile("^"+_opt_address_num+_street_match+_address_ambiguous+"$",re.IGNORECASE)
 
 _address_ambiguous2 = ReText(".+", 'Ambiguous')
@@ -299,7 +320,7 @@ _p_coords = re.compile("^"+_latitude+_longitude+"$", re.IGNORECASE)
 _p_plus_code = re.compile("^"+ReText(r"^[a-z0-9]+\+[a-z0-9]{2}", 'PlusCode')+"$", re.IGNORECASE)
 
 
-def _clean_groupdict(m):
+def _clean_groupdict(m, error='ignore'):
     m = m.groupdict()
     s = dir = None
     for k,v in m.items():
@@ -319,7 +340,7 @@ def _clean_groupdict(m):
             s = dir = None
 
         if v and k=='SecondBuildingName':
-            if 'BuildingName' in m and m['BuildingName']:
+            if error=='raise' and 'BuildingName' in m and m['BuildingName']:
                 raise NotImplementedError()
             m['BuildingName'] = v
             m[k] = None
@@ -327,18 +348,18 @@ def _clean_groupdict(m):
     return OrderedDict({k:v for k,v in m.items() if v is not None})
 
 
-def _address_search(p, x):
+def _address_search(p, x, error='ignore'):
     if isinstance(p, list):
         for y in p:
-            if (m:=_address_search(y, x)):
+            if (m:=_address_search(y, x, error=error)):
                 return m
         return m
     if m:=p.search(x):
-        m = _clean_groupdict(m)
+        m = _clean_groupdict(m, error=error)
 
     return m
 
-def _check_result(result, usa_result, col_name=None, address_string=None):
+def _check_result(result, usa_result, col_name=None):
     if result==usa_result:
         return True
     if result[1]=='Intersection':
@@ -431,7 +452,29 @@ def _check_result(result, usa_result, col_name=None, address_string=None):
         raise NotImplementedError()
 
 
-def tag(address_string, col_name, error='raise'):
+def tag(address_string: str, col_name: Optional[str]=None, error:str='ignore'):
+    """Split address into labeled components (address number, street name, etc.)
+
+    Parameters
+    ----------
+    address_string : str
+        String containing address
+    col_name : Optional[str], optional
+        Optional name of column that contained address_string. Only used if error='raise', by default None
+    error : str, optional
+        'raise' or 'ignore'. Whether to throw an error if either:
+        1. tagged result does not equal result produced by the usaddress package OR
+        2. tagged result is not recognized as a known correction to a usaddress package result
+        , by default 'ignore'
+
+    Returns
+    -------
+    dict
+        Dictionary containing tags and values for parsed address_string
+    str
+        Type assigned to street address string (Address, Block Address, Intersection, etc.)
+    """
+    
     assert error in ['raise','ignore']
     if pd.isnull(address_string):
         return ({}, "Null")
@@ -440,7 +483,7 @@ def tag(address_string, col_name, error='raise'):
             raise KeyError("Unknown dictionary keys for address")
         address_dict = json.loads(address_string['human_address'])
         result = tag(address_dict['address'], col_name, error)
-        if not all([x in ['address','city','state','zip'] for x in address_dict]):
+        if error=='raise' and not all([x in ['address','city','state','zip'] for x in address_dict]):
             raise NotImplementedError()
         for k, kout in zip(['city','state','zip'], ['PlaceName','StateName','ZipCode']):
             if k in address_dict and len(address_dict[k]):
@@ -450,48 +493,50 @@ def tag(address_string, col_name, error='raise'):
     # Ensure that /'s are surrounded by spaces
     address_string = address_string.strip().replace("/"," / ")
     m1=m2=m3=m4=m5=None
-    if m1:=_address_search(_p_unknown, address_string):
+    if m1:=_address_search(_p_unknown, address_string, error=error):
         return (m1, 'Null')
-    if m1:=_address_search(_p_zip_only, address_string):
-        return _get_address_result(m1, "Ambiguous")
-    if (m1:=_address_search(_p_block, address_string)) or \
-        (m2:=_address_search(_p_block2, address_string)) or \
-        (m3:=_address_search(_p_block3, address_string)) or \
-        (m4:=_address_search(_p_block4, address_string)) or \
-        (m5:=_address_search(_p_block_service_road, address_string)):
-        return _get_address_result([m1,m2,m3,m4,m5], "Block Address")
-    elif (m1:=_address_search(_p_directional, address_string)):
+    if m1:=_address_search(_p_zip_only, address_string, error=error):
+        return _get_address_result(m1, "Ambiguous", error=error)
+    if (m1:=_address_search(_p_block, address_string, error=error)) or \
+        (m2:=_address_search(_p_block2, address_string, error=error)) or \
+        (m3:=_address_search(_p_block3, address_string, error=error)) or \
+        (m4:=_address_search(_p_block4, address_string, error=error)) or \
+        (m5:=_address_search(_p_block_service_road, address_string, error=error)):
+        return _get_address_result([m1,m2,m3,m4,m5], "Block Address", error=error)
+    elif (m1:=_address_search(_p_directional, address_string, error=error)):
         return (m1, "StreetDirectional")
-    elif (m:=_address_search(_p_building, address_string)) or \
-        (m:=_address_search(_p_building2, address_string)):
-        return _get_address_result(m, "Building", address_string, type_check='Ambiguous')
+    elif (m:=_address_search(_p_building, address_string, error=error)) or \
+        (m:=_address_search(_p_building2, address_string, error=error)):
+        return _get_address_result(m, "Building", address_string, type_check='Ambiguous', error=error)
     elif m:=_address_search([_p_intersection_hwy,_p_intersection_hwy2, _p_intersection, _p_intersection2,
                              _p_intersection3, _p_intersection4, _p_intersection5, _p_intersection6], 
                             address_string):
-        return _get_address_result(m, "Intersection", address_string)
-    elif m1:=_address_search(_p_county, address_string):
+        return _get_address_result(m, "Intersection", address_string, error=error)
+    elif m1:=_address_search(_p_county, address_string, error=error):
         return (m1, "County")
-    elif (m1:=_address_search(_p_bridge, address_string)):
-        return _get_address_result(m1, "Bridge", address_string, type_check='Ambiguous')
-    elif (m:=_address_search(_p_hwy_address, address_string)) or \
-        (m:=_address_search(_p_address, address_string)) or \
-        (m:=_address_search(_p_address2, address_string)) or \
-        (m:=_address_search(_p_address_w_ambiguous, address_string)) or \
-        (m:=_address_search(_p_address3, address_string)):
-        return _get_address_result(m, "Street Address", address_string, col_name=col_name)
+    elif (m1:=_address_search(_p_bridge, address_string, error=error)):
+        return _get_address_result(m1, "Bridge", address_string, type_check='Ambiguous', error=error)
+    elif (m:=_address_search(_p_hwy_address, address_string, error=error)) or \
+        (m:=_address_search(_p_address, address_string, error=error)) or \
+        (m:=_address_search(_p_address2, address_string, error=error)) or \
+        (m:=_address_search(_p_address_w_ambiguous, address_string, error=error)) or \
+        (m:=_address_search(_p_address3, address_string, error=error)):
+        return _get_address_result(m, "Street Address", address_string, col_name=col_name, error=error)
     elif m1:=[_clean_groupdict(x) for x in re.finditer(_multiple_address, address_string)]:
-        results = [_get_address_result(x, "Street Address") for x in m1]
+        results = [_get_address_result(x, "Street Address", error=error) for x in m1]
         return [x[0] for x in results], [x[1] for x in results]
-    elif m1:=_address_search(_p_street_plus_ambiguous, address_string):
-        return _get_address_result(m1, "Street Address", address_string, check_ambiguous=True)
-    elif m:=_address_search(_p_coords, address_string):
-        return _get_address_result(m, "Coordinates")
-    elif m:=_address_search(_p_plus_code, address_string):
-        return _get_address_result(m, "PlusCode")
-    else:
+    elif m1:=_address_search(_p_street_plus_ambiguous, address_string, error=error):
+        return _get_address_result(m1, "Street Address", address_string, check_ambiguous=True, error=error)
+    elif m:=_address_search(_p_coords, address_string, error=error):
+        return _get_address_result(m, "Coordinates", error=error)
+    elif m:=_address_search(_p_plus_code, address_string, error=error):
+        return _get_address_result(m, "PlusCode", error=error)
+    elif error=='raise':
         raise NotImplementedError()
+    else:
+        return usaddress.tag(address_string)
     
-def _get_address_result(results, name, address_string=None, type_check=None, col_name=None, check_ambiguous=False):
+def _get_address_result(results, name, address_string=None, type_check=None, col_name=None, check_ambiguous=False, error='ignore'):
     if not isinstance(results, list):
         results = [results]
     for r in results:
@@ -509,10 +554,10 @@ def _get_address_result(results, name, address_string=None, type_check=None, col
         except:
             raise
         if type_check:
-            if usa_result[1]!=type_check:
+            if error=='raise' and usa_result[1]!=type_check:
                 raise NotImplementedError()
         elif check_ambiguous and usa_result[1]=='Ambiguous':
             pass
-        elif address_string and not _check_result(result, usa_result, col_name, address_string):
+        elif error=='raise' and address_string and not _check_result(result, usa_result, col_name):
             raise NotImplementedError()
     return result

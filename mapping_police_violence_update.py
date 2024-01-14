@@ -1,6 +1,5 @@
 import pandas as pd
 import os, sys
-from hashlib import sha1
 from datetime import datetime
 file_loc = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(file_loc)  # Add current file directory to path
@@ -11,39 +10,39 @@ from opddev.utils import opd_logger
 import openpolicedata as opd
 import logging
 
-# TODO: Remove NotImplementedError
-# TODO: Remove error inputs
-
+# Script for identifying police killing in OpenPoliceData (OPD) data not in MPV database.
 # They are logged to a datestamped file. If the script is run multiple times, cases will 
 # only be logged if they have not previously been logged.
 
-############## CONFIGURATION PARAMETERS ###########################
-
+############## SETUP PARAMETERS #########################################
 # File locations 
 # CSV file containing MPV data downloaded from https://airtable.com/appzVzSeINK1S3EVR/shroOenW19l1m3w0H/tblxearKzw8W7ViN8
 csv_filename = os.path.join(file_loc, r"data\MappingPoliceViolence", "Mapping Police Violence_Accessed20240101.csv")
-output_dir = os.path.join(file_loc, r"data\MappingPoliceViolence", "Updates", 'tmp') # Where to output cases found
+output_dir = os.path.join(file_loc, r"data\MappingPoliceViolence", "Updates") # Where to output cases found
+
+min_date = None   # Cases will be ignored before this date. If None, min_date will be set to the oldest date in MPV's data
+
+############## OTHER CONFIGURATION PARAMETERS ###########################
 
 # Names of columns that are not automatically identified
 mpv_addr_col = "street_address"
 mpv_state_col = 'state'
 
 # Parameters that affect which cases are logged
-min_date = None   # Cases will be ignored before this date. If None, min_date will be set to the oldest date in MPV's data
 include_unknown_fatal = False  # Whether to include cases where there was a shooting but it is unknown if it was fatal 
-log_demo_diffs = False  # Whether to log cases where a likely match between MPV and OPD cases were found but listed race or gender differs
-log_age_diffs = False  # Whether to log cases where a likely match between MPV and OPD cases were found but age differs
-# Whether to keep cases that are marked self-inflicted in the data
-keep_self_inflicted = False
+log_demo_diffs = False  # Whether to log cases where a likely match between MPV and OPD cases was found but listed race or gender differs
+log_age_diffs = False  # Whether to log cases where a likely match between MPV and OPD cases was found but age differs
+keep_self_inflicted = False   # Whether to keep cases that are marked self-inflicted in the data
 
 # Logging and restarting parameters
-istart = 1  # 1-based index (same as log statements) to start at in OPD datasets. Can be useful for restarting. Set to 0 to start from beginning.
+istart = 1  # 1-based index (same as log statements) to start at in OPD datasets. Can be useful for restarting. Set to 1 to start from beginning.
 logging_level = logging.INFO  # Logging level. Change to DEBUG for some additional messaging.
+unexpected_conditions = 'ignore'   # If 'error', an error will be thrown when a condition occurs that was not previously identified in testing.
 
 # There are sometimes demographic differences between MPV and other datasets for the same case
 # If a perfect demographics match is not found, an attempt can be made to allow differences in race and gender values
 # when trying to find a case with matching demographics. The below cases have been identified  as differing in some cases.
-# The pairs below will be considered equivalent if allowed_replacements is used
+# The pairs below will be considered equivalent when allowed_replacements is used
 allowed_replacements = {'race':[["HISPANIC/LATINO","INDIGENOUS"],["HISPANIC/LATINO","WHITE"],["HISPANIC/LATINO","BLACK"],
                                 ['ASIAN','ASIAN/PACIFIC ISLANDER']],
                         'gender':[['TRANSGENDER','MALE'],['TRANSGENDER','FEMALE']]}
@@ -58,7 +57,8 @@ except:
 
 logger = ois_matching.get_logger(logging_level)
 
-# Convert to OPD table so that standardization can be applied and some column names and terms for race and gender can be standardized
+# Load MPV database and convert to OPD table so that standardization can be applied and some 
+# column names and terms for race and gender can be standardized
 mpv_raw = pd.read_csv(csv_filename)
 mpv_table = opd.data.Table({"SourceName":"Mapping Police Violence", 
                       "State":opd.defs.MULTI, 
@@ -71,19 +71,17 @@ df_mpv = mpv_table.table  # Retrieve pandas DataFrame from Table class
 # Standard column names for all datasets that have these columns
 date_col = opd.defs.columns.DATE
 agency_col = opd.defs.columns.AGENCY
-fatal_col = opd.defs.columns.FATAL_SUBJECT
 role_col = opd.defs.columns.SUBJECT_OR_OFFICER
-injury_cols = [opd.defs.columns.INJURY_SUBJECT, opd.defs.columns.INJURY_OFFICER_SUBJECT]
 zip_col = opd.defs.columns.ZIP_CODE
 
-# Standard column names for MPV
+# Standard demographic column names for MPV
 mpv_race_col = ois_matching.get_race_col(df_mpv)
 mpv_gender_col = ois_matching.get_gender_col(df_mpv)
 mpv_age_col = ois_matching.get_age_col(df_mpv)
 
 min_date = pd.to_datetime(min_date) if min_date else df_mpv[date_col].min()
 
-# Get a list of officer-involved shootings and use of force tables in OPD
+# Get a list of officer-involved shootings and use of force datasets in OPD
 tables_to_use = [opd.defs.TableType.SHOOTINGS, opd.defs.TableType.SHOOTINGS_INCIDENTS,
                  opd.defs.TableType.USE_OF_FORCE, opd.defs.TableType.USE_OF_FORCE_INCIDENTS]
 opd_datasets = []
@@ -124,14 +122,14 @@ for k, row_dataset in opd_datasets.iloc[max(1,istart)-1:].iterrows():  # Loop ov
     opd_gender_col = opd_table.get_gender_col()
     opd_age_col = opd_table.get_age_col()
 
-    df_opd_all, known_fatal, test_cols = ois_matching.clean_data(opd_table, df_opd_all, row_dataset['TableType'], injury_cols, fatal_col, min_date, 
+    df_opd_all, known_fatal, test_cols = ois_matching.clean_data(opd_table, df_opd_all, row_dataset['TableType'], min_date, 
                                                   include_unknown_fatal, keep_self_inflicted)
 
     if len(df_opd_all)==0:
-        continue  # No data move to the next dataset
+        continue  # No data. Move to the next dataset
 
     # Find address or street column if it exists
-    addr_col = address_parser.find_address_col(df_opd_all)
+    addr_col = address_parser.find_address_col(df_opd_all, error=unexpected_conditions)
     addr_col = addr_col[0] if len(addr_col)>0 else None
 
     # If dataset has multiple agencies, loop over them individually
@@ -142,13 +140,17 @@ for k, row_dataset in opd_datasets.iloc[max(1,istart)-1:].iterrows():  # Loop ov
         else:
             df_opd = df_opd_all.copy()
 
-        # Get the location (agency_partial) and type (police department, sheriff's office, etc.) from the agency
-        agency_partial, agency_type = agencyutils.split(agency, row_dataset['State'], unknown_type='error')
+        # Get the location (agency_partial) and type (police department, sheriff's office, etc.) from the full agency name
+        agency_partial, agency_type = agencyutils.split(agency, row_dataset['State'], unknown_type=unexpected_conditions)
+        # Only keep rows that might correspond to the current agency
         df_mpv_agency = agencyutils.filter_agency(agency, agency_partial, agency_type, row_dataset['State'], 
-                                             df_mpv, agency_col, mpv_state_col, logger=logger)        
+                                             df_mpv, agency_col, mpv_state_col, logger=logger, error=unexpected_conditions)
+        
+        # Match OPD cases to MPV cases starting with strictest match requirements and then
+        # with progressively more relaxed requirements. There are frequent differences between
+        # the datasets in OPD and MPV that need to be dealt with. 
 
-        # First require a perfect demographics match then loosen demographics matching requirements
-        # There are differences between the OPD datasets and MPV due to mistakes and other issues
+        # args first requires a perfect demographics match then loosen demographics matching requirements
         # See ois_matching.check_for_match for definitions of the different methods for loosening 
         # demographics matching requirements
         args = [{}, {'max_age_diff':1,'check_race_only':True}, 
@@ -159,32 +161,51 @@ for k, row_dataset in opd_datasets.iloc[max(1,istart)-1:].iterrows():  # Loop ov
         match_with_age_diff = {}
         mpv_matched = pd.Series(False, df_mpv_agency.index)
         for a in args:
-            # Remove cases that match between OPD and MPV for cases that have the same date
+            # First find cases that have the same date and then check demographics and possibly zip code. Remove matches.
             df_opd, mpv_matched, subject_demo_correction, match_with_age_diff = ois_matching.remove_matches_date_match_first(
                 df_mpv_agency, df_opd, mpv_addr_col, addr_col, 
                 mpv_matched, subject_demo_correction, match_with_age_diff, a, 
-                test_cols)
+                test_cols, error=unexpected_conditions)
         
-        df_opd, mpv_matched = ois_matching.remove_matches_demographics_match_first(df_mpv_agency, df_opd, mpv_addr_col, addr_col, mpv_matched)
+        # First find cases that have the same demographics and then check if date is close and street matches (if there is an address column).
+        #  Remove matches.
+        df_opd, mpv_matched = ois_matching.remove_matches_demographics_match_first(df_mpv_agency, df_opd, 
+                                                                                   mpv_addr_col, addr_col, mpv_matched,
+                                                                                   error=unexpected_conditions)
 
         if addr_col:
+            # First find cases that have the same street and then check if date is close.  Remove matches.
             df_opd, mpv_matched, subject_demo_correction = ois_matching.remove_matches_street_match_first(df_mpv_agency, df_opd, mpv_addr_col, addr_col,
-                                      mpv_matched, subject_demo_correction)
-            df_opd = ois_matching.remove_matches_agencymismatch(df_mpv, df_mpv_agency, df_opd, mpv_state_col, mpv_addr_col, addr_col, row_dataset['State'])
+                                      mpv_matched, subject_demo_correction, error=unexpected_conditions)
+            # Sometimes, MPV has an empty or different agency so check other agencies.
+            # First find street match and then if date is close and demographics match. Remove matches.
+            df_opd = ois_matching.remove_matches_agencymismatch(df_mpv, df_mpv_agency, df_opd, mpv_state_col, row_dataset['State'], 
+                                                                'address', mpv_addr_col, addr_col,
+                                                                error=unexpected_conditions)
         else:
-            df_opd, mpv_matched, match_with_age_diff = ois_matching.remove_matches_close_date_match_zipcode(df_mpv_agency, df_opd, mpv_matched, allowed_replacements, match_with_age_diff)
+            # Remove cases where the zip code matches and the date is close
+            df_opd, mpv_matched, match_with_age_diff = ois_matching.remove_matches_close_date_match_zipcode(
+                    df_mpv_agency, df_opd, mpv_matched, match_with_age_diff, 
+                    allowed_replacements=allowed_replacements, error=unexpected_conditions)
+            # Sometimes, MPV has an empty or different agency so check other agencies.
+            # First find zip code match and then if date is close and demographics match. Remove matches.
+            df_opd = ois_matching.remove_matches_agencymismatch(df_mpv, df_mpv_agency, df_opd, mpv_state_col, row_dataset['State'], 
+                                                                'zip', error=unexpected_conditions)
                 
+        # Create a table with columns specific to this agency containing cases that may not already be in MPV
         df_save, keys = opd_logger.generate_agency_output_data(df_mpv_agency, df_opd, mpv_addr_col, addr_col, mpv_download_date,
                                 log_demo_diffs, subject_demo_correction, log_age_diffs, match_with_age_diff, agency, known_fatal)
         
         if len(df_save)>0:
-            # Save data specific to this source
+            # Save data specific to this source if it has not previously been saved
             source_basename = f"{row_dataset['SourceName']}_{row_dataset['State']}_{row_dataset['TableType']}_{row_dataset['Year']}"
             opd_logger.log(df_save, output_dir, source_basename, keys=keys, add_date=True, only_diffs=True)
 
+            # Create a table with general columns applicable to all agencies that may not already be in MPV
             df_global = opd_logger.generate_general_output_data(df_save, addr_col)
 
             # CSV file containing all recommended updates with a limited set of columns
             global_basename = 'Potential_MPV_Updates_Global'
             keys = ["MPV ID", 'type', 'known_fatal', 'OPD Date','OPD Agency','OPD Race', 'OPD Gender','OPD Age','OPD Address']
+            # Save general data to global file containing data for all OPD datasets
             opd_logger.log(df_global, output_dir, global_basename, keys=keys, add_date=True, only_diffs=True)

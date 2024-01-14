@@ -5,6 +5,7 @@ import numbers
 import openpolicedata as opd
 import pandas as pd
 import re
+from typing import Literal
 from . import address_parser
 from . import agencyutils
 
@@ -62,7 +63,12 @@ def zipcode_isequal(df1, df2, loc1=None, loc2=None, count=None, iloc1=None, iloc
             return matches.sum()==count
 
         return matches
-    return False
+    if isinstance(df1, pd.DataFrame) and len(df1)>1 and iloc1==None and loc1==None:
+        return pd.Series(False, index=df1.index)
+    elif isinstance(df2, pd.DataFrame) and len(df2)>1 and iloc2==None and loc2==None:
+        return pd.Series(False, index=df2.index)
+    else:
+        return False
 
 def split_words(string, case=None):
     # Split based on spaces, punctuation, and camel case
@@ -112,7 +118,7 @@ def drop_duplicates(df, subset=None, ignore_null=False, ignore_date_errors=False
         raise
 
     # Attempt cleanup and try again
-    p = re.compile('\s?&\s?')
+    p = re.compile(r'\s?&\s?')
     df_mod = df_mod.apply(lambda x: x.apply(lambda x: p.sub(' and ',x).lower() if isinstance(x,str) else x))
 
     if ignore_date_errors:
@@ -357,10 +363,53 @@ def _compare_values(orig_val1, orig_val2, idx,
         raise NotImplementedError(f"{col1} not equal: OPD: {val1} vs. {val2}")
 
 
-def check_for_match(df, row_match, 
-                    max_age_diff=0, allowed_replacements={},
-                    check_race_only=False, inexact_age=False, allow_race_diff=False,
-                    zip_match=False):
+def check_for_match(df: pd.DataFrame, 
+                    row_match: pd.Series, 
+                    max_age_diff: int=0, 
+                    allowed_replacements: dict={},
+                    check_race_only: bool=False, 
+                    inexact_age: bool=False, 
+                    allow_race_diff: bool=False,
+                    zip_match: bool=False):
+    """Find rows of df that have matching demographics with row_match
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Table to find matching demographics in
+    row_match : pd.Series
+        Series containing demographics values to match
+    max_age_diff : int, optional
+        Maximum allowed age difference, by default 0
+    allowed_replacements : dict, optional
+        Dictionary contained values that are allowed to be interchanged. Keys of dictionary can be
+        'race' (to indicate that the value contains race values that can be interchanged) or 'gender'.
+        The value is a list of lists where the individual lists contain values that are to be considered equivalent
+        (or to be acceptable differences). For example, if 
+        allowed_replacements={'race',[["HISPANIC/LATINO","INDIGENOUS"],['ASIAN','ASIAN/PACIFIC ISLANDER']]}, 
+        then, if the race of row_match was 'INDIGENOUS' and of a row of df was 'HISPANIC/LATINO', that would be
+        considered a match (same with 'ASIAN' and 'ASIAN/PACIFIC ISLANDER'), by default {}
+    check_race_only : bool, optional
+        If available, the race columns compared are the ones that combine race and ethnicity. If there is a race-only
+        column in addition to that, it will be used instead if this flag is True, by default False
+    inexact_age : bool, optional
+        If True, the age will be a match if the age in df matches the decade of the age in row_match 
+        (i.e. 30 would match any value from 30 to 39), by default False
+    allow_race_diff : bool, optional
+        If True, the race will be ignored when finding a match (only gender and age will be used), by default False
+    zip_match : bool, optional
+        If True, matches will require that df has a zip code column and that the zip code matches the one in row_match, by default False
+
+    Returns
+    -------
+    pd.Series
+        Boolean Series indicating whether each row of df matches row_match
+    pd.Series
+        Boolean Series indicating that for a match, there is a demographics column where MPV has an unknown value but df does not
+    pd.Series
+        Boolean Series indicating that for a match, the race is different
+
+    """
     is_unknown = pd.Series(False, index=df.index)
     is_diff_race = pd.Series(False, index=df.index)
     is_match = pd.Series(True, index=df.index)
@@ -376,7 +425,7 @@ def check_for_match(df, row_match,
     race_only_col_row = opd.defs.columns.RACE_SUBJECT if role_col not in row_match else opd.defs.columns.RACE_OFFICER_SUBJECT
 
     if len(set(allowed_replacements.keys()) - {'race','gender'})>0:
-        raise NotImplementedError("Replacements only implemented for race and gener currently")
+        raise KeyError("Replacements only implemented for race and gener currently")
     if 'race' in allowed_replacements:
         allowed_replacements = allowed_replacements.copy()
         allowed_replacements[rcol_row] = allowed_replacements.pop('race')
@@ -403,7 +452,42 @@ def check_for_match(df, row_match,
     return is_match, is_unknown, is_diff_race
 
 
-def clean_data(opd_table, df_opd, table_type, injury_cols, fatal_col, min_date, include_unknown_fatal=False, keep_self_inflicted=False):
+def clean_data(opd_table: opd.data.Table, 
+               df_opd: pd.DataFrame, 
+               table_type: str,
+               min_date: pd.Timestamp, 
+               include_unknown_fatal: bool=False, 
+               keep_self_inflicted: bool=False):
+    """Clean data:
+    1. Remove rows corresponding to officers instead of subjects
+    2. Remove non-fatal cases
+    3. Remove data prior to min_date
+    4. Drop duplicate rows for the same subject
+
+    Parameters
+    ----------
+    opd_table : opd.data.Table
+        OPD Table object for the dataset
+    df_opd : pd.DataFrame
+        Table of data for the dataset
+    table_type : str
+        Type of dataset (OFFICER-INVOLVED SHOOTINGS, USE OF FORCE, etc.)
+    min_date : pd.Timestamp
+        Minimum date to keep
+    include_unknown_fatal : bool, optional
+        Whether to keep officer-involved shootings where the data does not indicate if the shooting was fatal, by default False
+    keep_self_inflicted : bool, optional
+        Whether to keep shootings that are self-inflicted, by default False
+
+    Returns
+    -------
+    pd.DataFrame
+        Clean version of df_opd
+    bool
+        Whether it is known that each case was fatal
+    list[str]
+        List of columns used to determine if rows are duplicates
+    """
     # For data containing separate rows for officers and subjects, remove officers
     df_opd = remove_officer_rows(df_opd)
 
@@ -433,7 +517,7 @@ def clean_data(opd_table, df_opd, table_type, injury_cols, fatal_col, min_date, 
 
 
 def columns_for_duplicated_check(opd_table, df_matches_raw):
-    # Multiple cases may be due to multiple officers shooting. MPV data appears to be per person killed so need to removed duplicates
+    # Select columns to use when checking for duplicated rows
 
     # Start with null values that may only be missing in some records
     ignore_cols = df_matches_raw.columns[df_matches_raw.isnull().any()].tolist()
@@ -459,7 +543,7 @@ def columns_for_duplicated_check(opd_table, df_matches_raw):
             ignore_cols.append(c.new_column_name)
 
     for c in df_matches_raw.columns:
-        # Remove potential record IDs
+        # Remove various other columns can differ between rows corresponding to the same individual
         notin = ["officer", "narrative", "objectid", "incnum", 'text', ' hash', 
                  'firearm','longitude','latitude','rank', 'globalid','rin',
                  'description','force','ofc','sworn','emp','weapon','shots','reason',
@@ -509,7 +593,7 @@ def address_match(address1, address2, keys1=None, keys2=None, match_null=False):
     return False
 
 def street_match(address, col_name, col, notfound='ignore', match_addr_null=False, match_col_null=True):
-    addr_tags, addr_type = address_parser.tag(address, col_name)
+    addr_tags, addr_type = address_parser.tag(address, col_name, error='raise' if notfound=='error' else notfound)
 
     matches = pd.Series(False, index=col.index, dtype='object')
     if isinstance(addr_tags, list):
@@ -525,7 +609,7 @@ def street_match(address, col_name, col, notfound='ignore', match_addr_null=Fals
     for idx in col.index:
         if not address_match(addr_tags, col[idx], keys1=keys_check1, match_null=match_col_null):
             continue
-        ctags_all, ctype_all = address_parser.tag(col[idx], col.name)
+        ctags_all, ctype_all = address_parser.tag(col[idx], col.name, error='raise' if notfound=='error' else notfound)
         if not isinstance(ctags_all, list):
             ctags_all = [ctags_all]
             ctype_all = [ctype_all]
@@ -553,9 +637,46 @@ def get_logger(level):
     return logger
 
 
-def remove_matches_date_match_first(df_mpv_agency, df_opd, mpv_addr_col, addr_col, 
-                             mpv_matched, subject_demo_correction, match_with_age_diff, args,
-                             test_cols):
+def remove_matches_date_match_first(df_mpv_agency:pd.DataFrame, 
+                                    df_opd:pd.DataFrame, 
+                                    mpv_addr_col:str, 
+                                    addr_col: str, 
+                                    mpv_matched: pd.Series, 
+                                    subject_demo_correction: dict, 
+                                    match_with_age_diff: dict, 
+                                    args: list[dict],
+                                    test_cols: list[str],
+                                    error:str='ignore'):
+    """Loop over each row of df_mpv_agency to find cases in df_opd for the same date and matching demographics
+
+    Parameters
+    ----------
+    df_mpv_agency : pd.DataFrame
+        Table of MPV data for agency corresponding to df_opd
+    df_opd : pd.DataFrame
+        OPD table to match with MPV data
+    mpv_addr_col : str
+        Address column in MPV data
+    addr_col : str
+        Address column in OPD data
+    mpv_matched : pd.Series
+        Series indicating which MPV rows have previously been matched
+    subject_demo_correction : dict
+        Dictionary mapping MPV rows to OPD rows for the same case but which have race and/or gender differences
+    match_with_age_diff : dict
+        Dictionary mapping MPV rows to OPD rows for the same case but which have age differences
+    args : list[dict]
+        Keyword arguments that are passed to check_for_match to control how strict a match is required for demographics.
+        See check_for_match for what keyword arguments are available and their defintions
+    test_cols : list[str]
+        List of columns to use when looking for duplicate rows in df_opd
+    error : str, optional
+        'raise' or 'ignore'. Whether to throw an error if either previously unobserved condition found, by default 'ignore'
+
+    Returns
+    -------
+    Returns updated versions of df_opd, mpv_matched, subject_demo_correction, match_with_age_diff
+    """
     logger = logging.getLogger("ois")
     for j, row_mpv in df_mpv_agency.iterrows():
         df_matches = find_date_matches(df_opd, date_col, row_mpv[date_col])
@@ -581,11 +702,11 @@ def remove_matches_date_match_first(df_mpv_agency, df_opd, mpv_addr_col, addr_co
                 if len(drop_duplicates(df_matches[is_match], subset=test_cols_reduced, ignore_null=True, ignore_date_errors=True))==1:
                     # These are the same except for the address. Check if the addresses are similar
                     addr_match = street_match(df_matches[is_match][addr_col].iloc[0], addr_col, 
-                                                        df_matches[is_match][addr_col].iloc[1:], notfound='error')
+                                                        df_matches[is_match][addr_col].iloc[1:], notfound=error)
                     throw = not addr_match.all()
                 if throw:
                     #Check if address only matches one case
-                    addr_match = street_match(row_mpv[mpv_addr_col], mpv_addr_col, df_matches[is_match][addr_col], notfound='error')
+                    addr_match = street_match(row_mpv[mpv_addr_col], mpv_addr_col, df_matches[is_match][addr_col], notfound=error)
                     throw = addr_match.sum()!=1
                     if not throw:
                         is_match = addr_match
@@ -596,7 +717,7 @@ def remove_matches_date_match_first(df_mpv_agency, df_opd, mpv_addr_col, addr_co
             if throw:
                 if len(summary_col)>0:
                     throw = not (df_matches[summary_col]==df_matches[summary_col].iloc[0]).all().all()
-            if throw:
+            if throw and error=='raise':
                 raise NotImplementedError("Multiple matches found")
                 
         for idx in df_matches.index:
@@ -606,7 +727,7 @@ def remove_matches_date_match_first(df_mpv_agency, df_opd, mpv_addr_col, addr_co
                     subject_demo_correction[j] = df_matches.loc[idx]
                 if age_diff[idx]:
                     if j in match_with_age_diff:
-                        raise NotImplementedError("Attempting age diff id twice")
+                        raise ValueError("Attempting age diff id twice")
                     match_with_age_diff[j] = df_matches.loc[idx]
 
                 df_opd = df_opd.drop(index=idx)
@@ -615,8 +736,34 @@ def remove_matches_date_match_first(df_mpv_agency, df_opd, mpv_addr_col, addr_co
     return df_opd, mpv_matched, subject_demo_correction, match_with_age_diff
 
 
-def remove_matches_demographics_match_first(df_mpv_agency, df_opd, mpv_addr_col, addr_col, 
-                                            mpv_matched):
+def remove_matches_demographics_match_first(df_mpv_agency: pd.DataFrame, 
+                                            df_opd: pd.DataFrame, 
+                                            mpv_addr_col: str, 
+                                            addr_col: str, 
+                                            mpv_matched: pd.Series, 
+                                            error: str='ignore'):
+    """Loop over each row of df_mpv_agency to find cases in df_opd for the same demographics and close or matching date, address, and/or zip code
+
+    Parameters
+    ----------
+    df_mpv_agency : pd.DataFrame
+        Table of MPV data for agency corresponding to df_opd
+    df_opd : pd.DataFrame
+        OPD table to match with MPV data
+    mpv_addr_col : str
+        Address column in MPV data
+    addr_col : str
+        Address column in OPD data
+    mpv_matched : pd.Series
+        Series indicating which MPV rows have previously been matched
+    error : str, optional
+        'raise' or 'ignore'. Whether to throw an error if either previously unobserved condition found, by default 'ignore'
+
+    Returns
+    -------
+    Returns updated versions of df_opd, mpv_matched
+    """
+    
     for j, row_match in df_mpv_agency.iterrows():
         if len(df_opd)==0:
             break
@@ -630,7 +777,7 @@ def remove_matches_demographics_match_first(df_mpv_agency, df_opd, mpv_addr_col,
             if len(df_matches)>1:
                 date_close = in_date_range(df_matches[date_col], row_match[date_col], '3d')
                 if addr_col:
-                    addr_match = street_match(row_match[mpv_addr_col], mpv_addr_col, df_matches[addr_col], notfound='error')
+                    addr_match = street_match(row_match[mpv_addr_col], mpv_addr_col, df_matches[addr_col], notfound=error)
 
                 if date_close.sum()==1 and (not addr_col or addr_match[date_close].iloc[0]):
                     df_opd = df_opd.drop(index=df_matches[date_close].index)
@@ -641,32 +788,35 @@ def remove_matches_demographics_match_first(df_mpv_agency, df_opd, mpv_addr_col,
                 elif addr_col and (not addr_match.any() or \
                     in_date_range(df_matches[addr_match][date_col], row_match[date_col], min_delta='300d').all()):
                     continue
-                else:
+                elif error=='raise':
                     raise NotImplementedError()
+                else:
+                    continue
             elif not addr_col:
                 if in_date_range(df_matches[date_col], row_match[date_col], '2d').iloc[0]:
                     df_opd = df_opd.drop(index=df_matches.index)
                     mpv_matched[j] = True
                 elif in_date_range(df_matches[date_col], row_match[date_col], '11d').iloc[0]:
                     if zipcode_isequal(row_match, df_matches, iloc2=0):
-                        # row_match[zip_col]==df_matches[zip_col].iloc[0]:
                         df_opd = df_opd.drop(index=df_matches.index)
                         mpv_matched[j] = True
                     elif zipcode_isequal(row_match, df_matches, iloc2=0, count='none'):
-                        # zip_col and zip_col and df_matches.iloc[0][zip_col]!=row_match[zip_col]:
                         continue
-                    else:
+                    elif error=='raise':
                         raise NotImplementedError()
+                    else:
+                        continue
                 elif in_date_range(df_matches[date_col],row_match[date_col], min_delta='30d').iloc[0]:
                     continue
                 elif zipcode_isequal(row_match, df_matches, iloc2=0, count='none'):
-                #zip_col and zip_col and df_matches.iloc[0][zip_col]!=row_match[zip_col]:
                     continue
-                else:
+                elif error=='raise':
                     raise NotImplementedError()
+                else:
+                    continue
             else:
                 date_close = in_date_range(df_matches[date_col], row_match[date_col], '3d').iloc[0]
-                addr_match = street_match(row_match[mpv_addr_col], mpv_addr_col, df_matches[addr_col], notfound='error').iloc[0]
+                addr_match = street_match(row_match[mpv_addr_col], mpv_addr_col, df_matches[addr_col], notfound=error).iloc[0]
                 
                 if date_close and addr_match:
                     df_opd = df_opd.drop(index=df_opd[is_match].index)
@@ -675,15 +825,44 @@ def remove_matches_demographics_match_first(df_mpv_agency, df_opd, mpv_addr_col,
                     # Likely error in the month that was recorded
                     df_opd = df_opd.drop(index=df_opd[is_match].index)
                     mpv_matched[j] = True
-                elif addr_match:
+                elif error=='raise' and addr_match:
                     raise NotImplementedError()
-                elif in_date_range(df_matches[date_col], row_match[date_col], '110d').iloc[0]:
+                elif error=='raise' and in_date_range(df_matches[date_col], row_match[date_col], '110d').iloc[0]:
                     raise NotImplementedError()
     return df_opd, mpv_matched
 
 
-def remove_matches_street_match_first(df_mpv_agency, df_opd, mpv_addr_col, addr_col,
-                                      mpv_matched, subject_demo_correction):
+def remove_matches_street_match_first(df_mpv_agency: pd.DataFrame, 
+                                      df_opd: pd.DataFrame, 
+                                      mpv_addr_col: str, 
+                                      addr_col: str,
+                                      mpv_matched: pd.Series, 
+                                      subject_demo_correction: dict, 
+                                      error: str='ignore'):
+    """Loop over each row of df_opd to find cases in df_mpv_agency for the same street and close date
+
+    Parameters
+    ----------
+    df_mpv_agency : pd.DataFrame
+        Table of MPV data for agency corresponding to df_opd
+    df_opd : pd.DataFrame
+        OPD table to match with MPV data
+    mpv_addr_col : str
+        Address column in MPV data
+    addr_col : str
+        Address column in OPD data
+    mpv_matched : pd.Series
+        Series indicating which MPV rows have previously been matched
+    subject_demo_correction : dict
+        Dictionary mapping MPV rows to OPD rows for the same case but which have race and/or gender differences
+    error : str, optional
+        'raise' or 'ignore'. Whether to throw an error if either previously unobserved condition found, by default 'ignore'
+
+    Returns
+    -------
+    Returns updated versions of df_opd, mpv_matched, subject_demo_correction
+    """
+    
     j = 0
     while j<len(df_opd):
         if len(df_mpv_agency)==0:
@@ -691,17 +870,17 @@ def remove_matches_street_match_first(df_mpv_agency, df_opd, mpv_addr_col, addr_
         
         mpv_unmatched = df_mpv_agency[~mpv_matched]
 
-        matches = street_match(df_opd.iloc[j][addr_col], addr_col, mpv_unmatched[mpv_addr_col], notfound='error')
+        matches = street_match(df_opd.iloc[j][addr_col], addr_col, mpv_unmatched[mpv_addr_col], notfound=error)
 
         if matches.any():
             date_close = in_date_range(df_opd.iloc[j][date_col], mpv_unmatched[matches][date_col], '3d')
             if date_close.any():
-                if date_close.sum()>1:
+                if error=='raise' and date_close.sum()>1:
                     raise NotImplementedError()
                 date_close = [k for k,x in date_close.items() if x][0]
                 # Consider this a match with errors in the demographics
                 if date_close in subject_demo_correction:
-                    raise NotImplementedError("Attempting demo correction twice")
+                    raise ValueError("Attempting demo correction twice")
                 subject_demo_correction[date_close] = df_opd.iloc[j]
                 df_opd = df_opd.drop(index=df_opd.index[j])
                 mpv_matched[date_close] = True
@@ -711,7 +890,40 @@ def remove_matches_street_match_first(df_mpv_agency, df_opd, mpv_addr_col, addr_
     return df_opd, mpv_matched, subject_demo_correction
 
 
-def remove_matches_close_date_match_zipcode(df_mpv_agency, df_opd, mpv_matched, allowed_replacements, match_with_age_diff):
+def remove_matches_close_date_match_zipcode(df_mpv_agency: pd.DataFrame, 
+                                            df_opd: pd.DataFrame, 
+                                            mpv_matched: pd.Series, 
+                                            match_with_age_diff, 
+                                            allowed_replacements: dict={},
+                                            error='ignore'):
+    """Loop over each row of df_opd to find cases in df_mpv_agency for the same zip code and close date
+
+    Parameters
+    ----------
+    df_mpv_agency : pd.DataFrame
+        Table of MPV data for agency corresponding to df_opd
+    df_opd : pd.DataFrame
+        OPD table to match with MPV data
+    mpv_matched : pd.Series
+        Series indicating which MPV rows have previously been matched
+    match_with_age_diff : dict
+        Dictionary mapping MPV rows to OPD rows for the same case but which have age differences
+    allowed_replacements : dict
+        Dictionary contained values that are allowed to be interchanged. Keys of dictionary can be
+        'race' (to indicate that the value contains race values that can be interchanged) or 'gender'.
+        The value is a list of lists where the individual lists contain values that are to be considered equivalent
+        (or to be acceptable differences). For example, if 
+        allowed_replacements={'race',[["HISPANIC/LATINO","INDIGENOUS"],['ASIAN','ASIAN/PACIFIC ISLANDER']]}, 
+        then, if the race of row_match was 'INDIGENOUS' and of a row of df was 'HISPANIC/LATINO', that would be
+        considered a match (same with 'ASIAN' and 'ASIAN/PACIFIC ISLANDER'), by default {}
+    error : str, optional
+        'raise' or 'ignore'. Whether to throw an error if either previously unobserved condition found, by default 'ignore'
+
+    Returns
+    -------
+    Returns updated versions of df_opd, mpv_matched, match_with_age_diff
+    """
+
     test_gender_col = get_gender_col(df_opd)
     mpv_gender_col = get_gender_col(df_mpv_agency)
 
@@ -745,30 +957,84 @@ def remove_matches_close_date_match_zipcode(df_mpv_agency, df_opd, mpv_matched, 
                     (mpv_unmatched[date_close][mpv_gender_col]=="MALE").all():
                     j+=1
                     continue
-
-        raise NotImplementedError()
+        if error=='raise':
+            raise NotImplementedError()
 
     return df_opd, mpv_matched, match_with_age_diff
 
-def remove_matches_agencymismatch(df_mpv, df_mpv_agency, df_opd, mpv_state_col, mpv_addr_col, addr_col, state):
+def remove_matches_agencymismatch(df_mpv: pd.DataFrame, 
+                                  df_mpv_agency: pd.DataFrame, 
+                                  df_opd: pd.DataFrame, 
+                                  mpv_state_col: str, 
+                                  state: str,
+                                  match_type: Literal['address','zip'],
+                                  mpv_addr_col: str=None, 
+                                  addr_col: str=None, 
+                                  allowed_replacements: dict = {'race':[['ASIAN','ASIAN/PACIFIC ISLANDER']]},
+                                  error: str='ignore'):
+    """Loop over each row of df_mpv to find cases where the agency does not match but the street or zipcode and demographics match
+    and the date is close. 
+
+    Parameters
+    ----------
+    df_mpv : pd.DataFrame
+        Table of MPV data
+    df_mpv_agency : pd.DataFrame
+        Table of MPV data for agency corresponding to df_opd
+    df_opd : pd.DataFrame
+        OPD table to match with MPV data
+    mpv_state_col: str
+        State column in MPV data
+    state: str
+        State for agency corresponding to df_opd
+    match_type: Literal['address','zip']
+        Whether to match address or zip code
+    mpv_addr_col : str, optional
+        Address column in MPV data. If supplied, addr_col must be supplied and address match will be used.
+    addr_col : str, optional
+        Address column in OPD data. If supplied, mpv_addr_col must be supplied and address match will be used.
+    allowed_replacements : dict, optional
+        Dictionary contained values that are allowed to be interchanged. Keys of dictionary can be
+        'race' (to indicate that the value contains race values that can be interchanged) or 'gender'.
+        The value is a list of lists where the individual lists contain values that are to be considered equivalent
+        (or to be acceptable differences). For example, if 
+        allowed_replacements={'race',[["HISPANIC/LATINO","INDIGENOUS"],['ASIAN','ASIAN/PACIFIC ISLANDER']]}, 
+        then, if the race of row_match was 'INDIGENOUS' and of a row of df was 'HISPANIC/LATINO', that would be
+        considered a match (same with 'ASIAN' and 'ASIAN/PACIFIC ISLANDER'), by default {}
+    error : str, optional
+        'raise' or 'ignore'. Whether to throw an error if either previously unobserved condition found, by default 'ignore'
+
+    Returns
+    -------
+    Returns updated versions of df_opd, mpv_matched, subject_demo_correction
+    """
+
+    match_type = match_type.lower()
+    assert match_type in ['address','zip']
+    if match_type=='address':
+        assert mpv_addr_col and addr_col
+
     # Check for cases where shooting might be listed under another agency or MPV agency might be null
     mpv_state = agencyutils.filter_state(df_mpv, mpv_state_col, state)
     # Remove cases that have already been checked
     mpv_state = mpv_state.drop(index=df_mpv_agency.index)
     j = 0
     while j<len(df_opd):
-        addr_match = street_match(df_opd.iloc[j][addr_col], addr_col, mpv_state[mpv_addr_col], 
-                                                notfound='error', match_col_null=False)
+        if match_type=='zip':
+            addr_match = zipcode_isequal(df_opd, mpv_state, iloc1=j)
+        else:
+            addr_match = street_match(df_opd.iloc[j][addr_col], addr_col, mpv_state[mpv_addr_col], 
+                                                    notfound=error, match_col_null=False)
         if addr_match.any() and \
             in_date_range(df_opd.iloc[j][date_col], mpv_state[addr_match][date_col], '30d').any():
             if (m:=in_date_range(df_opd.iloc[j][date_col], mpv_state[addr_match][date_col], '1d')).any():
-                is_match, _, _ = check_for_match(mpv_state.loc[addr_match[addr_match][m].index], df_opd.iloc[j])
+                is_match, _, _ = check_for_match(mpv_state.loc[addr_match[addr_match][m].index], df_opd.iloc[j], allowed_replacements=allowed_replacements)
                 if is_match.any():
                     df_opd = df_opd.drop(index=df_opd.index[j])
                     continue
-                else:
+                elif error=='raise':
                     raise NotImplementedError()
-            else:
+            elif error=='raise':
                 raise NotImplementedError()
             
         j+=1
