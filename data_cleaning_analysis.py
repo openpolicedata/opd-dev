@@ -46,8 +46,8 @@ logger.addHandler(fh)
 logger.addHandler(sh)
 logger.setLevel(logging.DEBUG)
 
-if csvfile != None:
-    opd.datasets.datasets = opd.datasets._build(csvfile)
+if csvfile:
+    opd.datasets.reload(csvfile)
 datasets = opd.datasets.query()
 if run_all_stanford:
     max_num_stanford = float("inf")
@@ -399,9 +399,13 @@ for i in range(istart, len(datasets)):
                     continue
                 except:
                     raise
+
+                if len(table.table)==0:
+                    table = src.load(datasets.iloc[i]["TableType"], y,
+                            agency=agency)
             elif run_all_years:
                 try:
-                    table = src.load_from_url(y, table_type=datasets.iloc[i]["TableType"], 
+                    table = src.load(datasets.iloc[i]["TableType"], y,
                             agency=agency)
                 except opd.exceptions.OPD_FutureError:
                     continue
@@ -451,7 +455,7 @@ for i in range(istart, len(datasets)):
                 agency=agency,output_dir=backup_dir, zip=is_zip)
         else:
             try:
-                table = src.load_from_url(datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
+                table = src.load(datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"], 
                         agency=agency)
             except opd.exceptions.OPD_FutureError:
                 continue

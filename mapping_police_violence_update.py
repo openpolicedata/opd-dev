@@ -95,13 +95,13 @@ for k, row_dataset in opd_datasets.iloc[max(1,istart)-1:].iterrows():  # Loop ov
 
     # Load this OPD dataset
     src = opd.Source(row_dataset["SourceName"], state=row_dataset["State"])    # Create source for agency
-    opd_table = src.load_from_url(row_dataset['Year'], row_dataset['TableType'])  # Load data
+    opd_table = src.load(row_dataset['TableType'], row_dataset['Year'])  # Load data
     opd_table.standardize(agg_race_cat=True)  # Standardize data
     opd_table.expand(mismatch='splitsingle')  # Expand cases where the info for multiple people are contained in the same row
     # Some tables contain incident information in 1 table and subject and/or officer information in other tables
     related_table, related_years = src.find_related_tables(opd_table.table_type, opd_table.year, sub_type='SUBJECTS')
     if related_table:
-        t2 = src.load_from_url(related_years[0], related_table[0])
+        t2 = src.load(related_table[0], related_years[0])
         t2.standardize(agg_race_cat=True)
         try:
             # Merge incident and subjects tables on their unique ID columns to create 1 row per subject

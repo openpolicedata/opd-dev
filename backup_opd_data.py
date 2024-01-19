@@ -164,7 +164,7 @@ for i in range(istart, len(datasets)):
                 continue
 
         try:
-            table = src.load_from_url(datasets.iloc[i]["Year"], datasets.iloc[i]["TableType"])
+            table = src.load(datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"])
         except Exception as e:
             log_to_file(srcName, datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"], e.args)
             continue
@@ -203,7 +203,7 @@ for i in range(istart, len(datasets)):
             print(f"\t{now} Year: {year}")
 
             try:
-                table = src.load_from_url(year, datasets.iloc[i]["TableType"])
+                table = src.load(datasets.iloc[i]["TableType"], year)
             except Exception as e:
                 log_to_file(srcName, datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"], year, e.args)
                 continue

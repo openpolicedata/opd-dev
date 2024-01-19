@@ -196,7 +196,7 @@ for k in df_opd.index:
                         if not gap_found:
                             raise ValueError("No gap found")
                         
-                    table = src.load_from_url(years_req, table_type=df_opd.loc[k,"TableType"])
+                    table = src.load(df_opd.loc[k,"TableType"], years_req)
                     if table.table is None or len(table.table)==0:
                         raise ValueError("Empty table")
                     df_opd.loc[k,"coverage_start"] = table.table[cur_row["date_field"]].min().strftime('%m/%d/%Y')
@@ -210,13 +210,13 @@ for k in df_opd.index:
                 if pd.notnull(df_opd.loc[k,"date_field"]):
                     # Fill out start date with date from data
                     nrows = 1 if data_type_to_access_type[df_opd.loc[k, "DataType"]]=="API" else None
-                    table = src.load_from_url(year=years[0], table_type=df_opd.loc[k,"TableType"], nrows=nrows)
+                    table = src.load(year=years[0], table_type=df_opd.loc[k,"TableType"], nrows=nrows)
                     if len(table.table)==0:
                         raise ValueError("No records found in first year")
                     df_opd.loc[k,"coverage_start"] = table.table[cur_row["date_field"]].min().strftime('%m/%d/%Y')
                     if years[-1] < cur_year-2:
                         # Assuming this isn't a current dataset
-                        table = src.load_from_url(year=years[-1], table_type=df_opd.loc[k,"TableType"])
+                        table = src.load(year=years[-1], table_type=df_opd.loc[k,"TableType"])
                         df_opd.loc[k,"coverage_end"] = table.table[cur_row["date_field"]].max().strftime('%m/%d/%Y')
                 else:
                     df_opd.loc[k,"coverage_start"] = f"1/1/{years[0]}"
