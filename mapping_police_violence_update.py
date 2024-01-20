@@ -62,17 +62,17 @@ logger = ois_matching.get_logger(logging_level)
 mpv_raw = pd.read_csv(csv_filename)
 mpv_table = opd.data.Table({"SourceName":"Mapping Police Violence", 
                       "State":opd.defs.MULTI, 
-                      "TableType":opd.defs.TableType.SHOOTINGS}, 
+                      "TableType":opd.TableType.SHOOTINGS}, 
                      mpv_raw,
                      opd.defs.MULTI)
-mpv_table.standardize(known_cols={opd.defs.columns.AGENCY:"agency_responsible"})
+mpv_table.standardize(known_cols={opd.Column.AGENCY:"agency_responsible"})
 df_mpv = mpv_table.table  # Retrieve pandas DataFrame from Table class
 
 # Standard column names for all datasets that have these columns
-date_col = opd.defs.columns.DATE
-agency_col = opd.defs.columns.AGENCY
-role_col = opd.defs.columns.SUBJECT_OR_OFFICER
-zip_col = opd.defs.columns.ZIP_CODE
+date_col = opd.Column.DATE
+agency_col = opd.Column.AGENCY
+role_col = opd.Column.SUBJECT_OR_OFFICER
+zip_col = opd.Column.ZIP_CODE
 
 # Standard demographic column names for MPV
 mpv_race_col = ois_matching.get_race_col(df_mpv)
@@ -82,8 +82,8 @@ mpv_age_col = ois_matching.get_age_col(df_mpv)
 min_date = pd.to_datetime(min_date) if min_date else df_mpv[date_col].min()
 
 # Get a list of officer-involved shootings and use of force datasets in OPD
-tables_to_use = [opd.defs.TableType.SHOOTINGS, opd.defs.TableType.SHOOTINGS_INCIDENTS,
-                 opd.defs.TableType.USE_OF_FORCE, opd.defs.TableType.USE_OF_FORCE_INCIDENTS]
+tables_to_use = [opd.TableType.SHOOTINGS, opd.TableType.SHOOTINGS_INCIDENTS,
+                 opd.TableType.USE_OF_FORCE, opd.TableType.USE_OF_FORCE_INCIDENTS]
 opd_datasets = []
 for t in tables_to_use:
     opd_datasets.append(opd.datasets.query(table_type=t))
@@ -106,8 +106,8 @@ for k, row_dataset in opd_datasets.iloc[max(1,istart)-1:].iterrows():  # Loop ov
         try:
             # Merge incident and subjects tables on their unique ID columns to create 1 row per subject
             opd_table = opd_table.merge(t2, std_id=True)
-        except ValueError as e:
-            if len(e.args)>0 and e.args[0]=='No incident ID column found' and \
+        except opd.exceptions.AutoMergeError as e:
+            if len(e.args)>0 and e.args[0]=='Unable to automatically find ID that relates tables' and \
                 row_dataset["SourceName"]=='Charlotte-Mecklenburg':
                 # Dataset has no incident ID column. Latitude/longitude seems to work instead
                 opd_table = opd_table.merge(t2, on=['Latitude','Longitude'])
@@ -133,10 +133,10 @@ for k, row_dataset in opd_datasets.iloc[max(1,istart)-1:].iterrows():  # Loop ov
     addr_col = addr_col[0] if len(addr_col)>0 else None
 
     # If dataset has multiple agencies, loop over them individually
-    agency_names = df_opd_all[opd.defs.columns.AGENCY].unique() if row_dataset['Agency']==opd.defs.MULTI else [row_dataset['AgencyFull']]
+    agency_names = df_opd_all[opd.Column.AGENCY].unique() if row_dataset['Agency']==opd.defs.MULTI else [row_dataset['AgencyFull']]
     for agency in agency_names:
         if row_dataset['Agency']==opd.defs.MULTI:
-            df_opd = df_opd_all[df_opd_all[opd.defs.columns.AGENCY]==agency].copy()
+            df_opd = df_opd_all[df_opd_all[opd.Column.AGENCY]==agency].copy()
         else:
             df_opd = df_opd_all.copy()
 

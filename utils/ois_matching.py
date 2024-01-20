@@ -10,12 +10,12 @@ from . import address_parser
 from . import agencyutils
 
 # Columns will be standardized below to use these names
-date_col = opd.defs.columns.DATE
-agency_col = opd.defs.columns.AGENCY
-fatal_col = opd.defs.columns.FATAL_SUBJECT
-role_col = opd.defs.columns.SUBJECT_OR_OFFICER
-injury_cols = [opd.defs.columns.INJURY_SUBJECT, opd.defs.columns.INJURY_OFFICER_SUBJECT]
-zip_col = opd.defs.columns.ZIP_CODE
+date_col = opd.Column.DATE
+agency_col = opd.Column.AGENCY
+fatal_col = opd.Column.FATAL_SUBJECT
+role_col = opd.Column.SUBJECT_OR_OFFICER
+injury_cols = [opd.Column.INJURY_SUBJECT, opd.Column.INJURY_OFFICER_SUBJECT]
+zip_col = opd.Column.ZIP_CODE
 
 # Race values will be standardized below to use these values
 race_vals = opd.defs.get_race_cats()
@@ -98,9 +98,9 @@ def split_words(string, case=None):
 
 def drop_duplicates(df, subset=None, ignore_null=False, ignore_date_errors=False):
     subset = subset if subset else df.columns
-    if opd.defs.columns.DATE in df and not isinstance(df[opd.defs.columns.DATE].dtype, pd.PeriodDtype):
+    if opd.Column.DATE in df and not isinstance(df[opd.Column.DATE].dtype, pd.PeriodDtype):
         df = df.copy()
-        df[opd.defs.columns.DATE] = df[opd.defs.columns.DATE].apply(lambda x: x.replace(hour=0, minute=0, second=0))
+        df[opd.Column.DATE] = df[opd.Column.DATE].apply(lambda x: x.replace(hour=0, minute=0, second=0))
 
     try:
         df = df.drop_duplicates(subset=subset, ignore_index=True)
@@ -235,30 +235,30 @@ def find_date_matches(df_test, date_col, date):
 
 
 def get_race_col(df):
-    if opd.defs.columns.RE_GROUP_SUBJECT in df:
-        return opd.defs.columns.RE_GROUP_SUBJECT
-    elif opd.defs.columns.RE_GROUP_OFFICER_SUBJECT in df:
-        return opd.defs.columns.RE_GROUP_OFFICER_SUBJECT 
+    if opd.Column.RE_GROUP_SUBJECT in df:
+        return opd.Column.RE_GROUP_SUBJECT
+    elif opd.Column.RE_GROUP_OFFICER_SUBJECT in df:
+        return opd.Column.RE_GROUP_OFFICER_SUBJECT 
     else:
         return None
 
 def get_gender_col(df):
-    if opd.defs.columns.GENDER_SUBJECT in df:
-        return opd.defs.columns.GENDER_SUBJECT
-    elif opd.defs.columns.GENDER_OFFICER_SUBJECT in df:
-        return opd.defs.columns.GENDER_OFFICER_SUBJECT 
+    if opd.Column.GENDER_SUBJECT in df:
+        return opd.Column.GENDER_SUBJECT
+    elif opd.Column.GENDER_OFFICER_SUBJECT in df:
+        return opd.Column.GENDER_OFFICER_SUBJECT 
     else:
         return None
 
 def get_age_col(df):
-    if opd.defs.columns.AGE_SUBJECT in df:
-        return opd.defs.columns.AGE_SUBJECT
-    elif opd.defs.columns.AGE_OFFICER_SUBJECT in df:
-        return opd.defs.columns.AGE_OFFICER_SUBJECT
-    elif opd.defs.columns.AGE_RANGE_SUBJECT in df:
-        return opd.defs.columns.AGE_RANGE_SUBJECT
-    elif opd.defs.columns.AGE_RANGE_OFFICER_SUBJECT in df:
-        return opd.defs.columns.AGE_RANGE_OFFICER_SUBJECT
+    if opd.Column.AGE_SUBJECT in df:
+        return opd.Column.AGE_SUBJECT
+    elif opd.Column.AGE_OFFICER_SUBJECT in df:
+        return opd.Column.AGE_OFFICER_SUBJECT
+    elif opd.Column.AGE_RANGE_SUBJECT in df:
+        return opd.Column.AGE_RANGE_SUBJECT
+    elif opd.Column.AGE_RANGE_OFFICER_SUBJECT in df:
+        return opd.Column.AGE_RANGE_OFFICER_SUBJECT
     else:
         return None
 
@@ -414,7 +414,7 @@ def check_for_match(df: pd.DataFrame,
     is_diff_race = pd.Series(False, index=df.index)
     is_match = pd.Series(True, index=df.index)
 
-    race_only_col_df = opd.defs.columns.RACE_SUBJECT if role_col not in df else opd.defs.columns.RACE_OFFICER_SUBJECT
+    race_only_col_df = opd.Column.RACE_SUBJECT if role_col not in df else opd.Column.RACE_OFFICER_SUBJECT
     rcol_df = get_race_col(df)
     gcol_df = get_gender_col(df)
     acol_df = get_age_col(df)
@@ -422,7 +422,7 @@ def check_for_match(df: pd.DataFrame,
     rcol_row = get_race_col(row_match)
     gcol_row = get_gender_col(row_match)
     acol_row = get_age_col(row_match)
-    race_only_col_row = opd.defs.columns.RACE_SUBJECT if role_col not in row_match else opd.defs.columns.RACE_OFFICER_SUBJECT
+    race_only_col_row = opd.Column.RACE_SUBJECT if role_col not in row_match else opd.Column.RACE_OFFICER_SUBJECT
 
     if len(set(allowed_replacements.keys()) - {'race','gender'})>0:
         raise KeyError("Replacements only implemented for race and gener currently")
@@ -524,7 +524,7 @@ def columns_for_duplicated_check(opd_table, df_matches_raw):
     keep_cols = []
     for c in opd_table.get_transform_map():
         # Looping over list of columns that were standardized which provides old and new column names
-        if c.new_column_name==opd.defs.columns.INJURY_SUBJECT:
+        if c.new_column_name==opd.Column.INJURY_SUBJECT:
             # Same subject can have multiple injuries
             ignore_cols.append(c.new_column_name)
             ignore_cols.append("RAW_"+c.orig_column_name)
