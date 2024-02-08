@@ -22,13 +22,24 @@ output_dir = os.path.join(output_dir, 'standardization')
 if not os.path.exists(output_dir):
     raise FileNotFoundError(f"Output directory {output_dir} does not exist")
 
-istart = 883 #727, 241, 242, 255, 277, 430
+# pd.to_datetime(x, errors='ignore')
+#601: Sparks?
+# FutureWarning: 'A-DEC' is deprecated and will be removed in a future version, please use 'Y-DEC' instead.
+# 605: NJ State Police
+# C:\Users\matth\repos\openpolicedata\..\openpolicedata\openpolicedata\datetime_parser.py:22: FutureWarning: Setting an item of incompatible dtype is deprecated and will raise in a future error of pandas. Value '0         2020
+# Name: year, Length: 398929, dtype: int64' has dtype incompatible with period[Y-DEC], please explicitly cast to a compatible dtype first.
+#   d.iloc[:,0] = date_col.iloc[:,0].dt.year
+# Tucson OIS
+#  FutureWarning: In a future version of pandas, parsing datetimes with mixed time zones will raise an error unless `utc=True`. Please specify `utc=True` to opt in to the new behaviour and silence this warning. To create a `Series` with mixed offsets and `object` dtype, please use `apply` and `datetime.datetime.strptime`
+istart = 745
 
 csvfile = None
 csvfile = r"..\opd-data\opd_source_table.csv"
 run_all_stanford = False
 run_all_years = True
 run_all_agencies = True  # Run all agencies for multi-agency cases
+force_load_from_url = False
+load_if_date_before = '01/28/2024'
 verbose = False
 allowed_updates = []
 
@@ -54,6 +65,13 @@ if run_all_stanford:
 else:
     max_num_stanford = 20
 
+def load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
+    return not force_load_from_url and\
+        (os.path.exists(zip_filename) or os.path.exists(csv_filename)) and \
+        (not load_if_date_before or \
+            (os.path.exists(csv_filename) and \
+             pd.to_datetime(os.path.getmtime(csv_filename), unit='s', origin='unix')>=pd.to_datetime(load_if_date_before)))
+
 prev_columns = []
 prev_maps = {}
 def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, year):
@@ -76,107 +94,15 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
             else:
                 os.remove(pkl_filename_in[0])
                 pkl_filename_in = []
-        except:
+        except ValueError as e:
+            if str(e)=='Invalid frequency: Y-DEC':
+                os.remove(pkl_filename_in[0])
+                pkl_filename_in = []
+            else:
+                raise
+        except Exception as e:
             raise
     if len(pkl_filename_in)>0:
-        rs = None
-        ofs = None
-        rofs = None
-        new_cols = [x.new_column_name for x in old_data_maps]
-
-        if "SUBJECT_RACE_ONLY" in new_cols:
-            rs = "RACE/ETHNICITY"
-            for d in old_data_maps:
-                if d.new_column_name=="SUBJECT_RACE":
-                    d.new_column_name="SUBJECT_RACE/ETHNICITY"
-                    d.orig_column_name[0] = "SUBJECT_RACE"
-                if d.new_column_name=="SUBJECT_RACE_ONLY":
-                    d.new_column_name="SUBJECT_RACE"
-        elif "SUBJECT_RACE" in new_cols:
-            rs = 'RACE'
-            if "SUBJECT_ETHNICITY" not in new_cols:
-                idx = [k for k,x in enumerate(new_cols) if x=="SUBJECT_RACE"][0]
-                if "HISPANIC / LATINO" in old_data_maps[idx].data_maps.values():
-                    rs = "RACE/ETHNICITY"
-                    old_data_maps[idx].new_column_name = "SUBJECT_RACE/ETHNICITY"
-                    idx = [k for k,x in enumerate(new_cols) if x=="SUBJECT_RE_GROUP"]
-                    if idx:
-                        old_data_maps[idx[0]].orig_column_name = "SUBJECT_RACE/ETHNICITY"
-        elif "OFFICER/SUBJECT_RACE_ONLY" in new_cols:
-            rofs = "RACE/ETHNICITY"
-            for d in old_data_maps:
-                if d.new_column_name=="OFFICER/SUBJECT_RACE":
-                    d.new_column_name="OFFICER/SUBJECT_RACE/ETHNICITY"
-                    d.orig_column_name[0] = "OFFICER/SUBJECT_RACE"
-                if d.new_column_name=="OFFICER/SUBJECT_RACE_ONLY":
-                    d.new_column_name="OFFICER/SUBJECT_RACE"
-        elif "OFFICER/SUBJECT_RACE" in new_cols:
-            rofs = 'RACE'
-            if "OFFICER/SUBJECT_ETHNICITY" not in new_cols:
-                idx = [k for k,x in enumerate(new_cols) if x=="OFFICER/SUBJECT_RACE"][0]
-                if "HISPANIC / LATINO" in old_data_maps[idx].data_maps.values():
-                    rofs = "RACE/ETHNICITY"
-                    old_data_maps[idx].new_column_name = "OFFICER/SUBJECT_RACE/ETHNICITY"
-                    idx = [k for k,x in enumerate(new_cols) if x=="OFFICER/SUBJECT_RE_GROUP"]
-                    if idx:
-                        old_data_maps[idx[0]].orig_column_name = "OFFICER/SUBJECT_RACE/ETHNICITY"
-
-        if "OFFICER_RACE_ONLY" in new_cols:
-            ofs = "RACE/ETHNICITY"
-            for d in old_data_maps:
-                if d.new_column_name=="OFFICER_RACE":
-                    d.new_column_name="OFFICER_RACE/ETHNICITY"
-                    d.orig_column_name[0] = "OFFICER_RACE"
-                if d.new_column_name=="OFFICER_RACE_ONLY":
-                    d.new_column_name="OFFICER_RACE"
-        elif "OFFICER_RACE" in new_cols:
-            ofs = 'RACE'
-            if "OFFICER_ETHNICITY" not in new_cols:
-                idx = [k for k,x in enumerate(new_cols) if x=="OFFICER_RACE"][0]
-                if "HISPANIC / LATINO" in old_data_maps[idx].data_maps.values():
-                    ofs = "RACE/ETHNICITY"
-                    old_data_maps[idx].new_column_name = "OFFICER_RACE/ETHNICITY"
-                    idx = [k for k,x in enumerate(new_cols) if x=="OFFICER_RE_GROUP"]
-                    if len(idx):
-                        old_data_maps[idx[0]].orig_column_name = "OFFICER_RACE/ETHNICITY"
-
-        if rs is not None and 'SUBJECT_RE_GROUP' not in new_cols:
-            old_data_maps.append(opd._preproc_utils.DataMapping(orig_column_name="SUBJECT_"+rs, new_column_name='SUBJECT_RE_GROUP'))
-
-        if ofs is not None and 'OFFICER_RE_GROUP' not in new_cols:
-            old_data_maps.append(opd._preproc_utils.DataMapping(orig_column_name="OFFICER_"+ofs, new_column_name='OFFICER_RE_GROUP'))
-
-        if rofs is not None and 'OFFICER/SUBJECT_RE_GROUP' not in new_cols:
-            old_data_maps.append(opd._preproc_utils.DataMapping(orig_column_name="OFFICER/SUBJECT_"+rofs, new_column_name='OFFICER/SUBJECT_RE_GROUP'))
-
-        for j, c in enumerate(new_cols):
-            if old_data_maps[j].data_maps is not None and any([isinstance(x,list) for x in old_data_maps[j].data_maps.values()]):
-                for k,v in old_data_maps[j].data_maps.items():
-                    if isinstance(v, list):
-                        v.sort()
-                        old_data_maps[j].data_maps[k] = ", ".join(v)
-            if "RACE" in c and old_data_maps[j].data_maps:
-                for k,v in old_data_maps[j].data_maps.items():
-                    # if pd.notnull(k) and isinstance(k,(str,list)) and not (v=="HISPANIC / LATINO" or v=="HISPANIC/LATINO") and \
-                    #     (v!="WHITE" and (not isinstance(v,list) or "WHITE" not in v)) and \
-                    #         re.findall('whi?te',k,re.IGNORECASE):
-                    #     v = [v,'WHITE']
-                    #     old_data_maps[j].data_maps[k] = v
-                    if " / " in v:
-                        v = v.replace(" / ","/")
-                        old_data_maps[j].data_maps[k] = v
-                    if pd.notnull(k) and isinstance(k,str) and k.lower() in ["f",'filipino'] and v=='ASIAN/PACIFIC ISLANDER':
-                        v = "ASIAN"
-                        old_data_maps[j].data_maps[k] = v
-                    if isinstance(v,list):
-                        for m,x in enumerate(v):
-                            if " / " in x:
-                                v[m] = x.replace(" / ","/")
-                                old_data_maps[j].data_maps[k] = v
-                        if 'HISPANIC/LATINO' in v:
-                            v = 'HISPANIC/LATINO'
-                            old_data_maps[j].data_maps[k] = v
-
         if data_maps==old_data_maps:
             # Update to deal with pandas back-compatibility issue
             if pkl_filename_out != pkl_filename_in[0]:
@@ -204,23 +130,42 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
                         # if old_data_maps[j].orig_value_counts is not None:
                         #     old_data_maps[j].orig_value_counts.index = old_data_maps[j].orig_value_counts.index.astype(data_maps[k].orig_value_counts.index.dtype)
                         if old_data_maps[j].orig_column_name == data_maps[k].orig_column_name:
-                            for key in old_data_maps[j].data_maps.keys():
-                                key2 = key
-                                if pd.isnull(key) or key=='NA':
-                                    key2 = [x for x in data_maps[k].data_maps.keys() if pd.isnull(x)][0]
-                                if old_data_maps[j].data_maps[key]!=data_maps[k].data_maps[key2]:
-                                    if isinstance(old_data_maps[j].data_maps[key], list) and \
-                                        isinstance(data_maps[k].data_maps[key2], list) and \
-                                        len(old_data_maps[j].data_maps[key])==len(data_maps[k].data_maps[key2]) and \
-                                        set(old_data_maps[j].data_maps[key])==set(data_maps[k].data_maps[key2]):
-                                        continue
+                            if old_data_maps[j].data_maps:
+                                for key in old_data_maps[j].data_maps.keys():
+                                    key2 = key
+                                    if pd.isnull(key) or key=='NA':
+                                        key2 = [x for x in data_maps[k].data_maps.keys() if pd.isnull(x) or (isinstance(x,str) and x in 'N/A')]
+                                        if len(key2)==0:
+                                            if 'None' in data_maps[k].data_maps.keys() and \
+                                                'None' not in old_data_maps[j].data_maps.keys():
+                                                continue
+                                            else:
+                                                continue
+
+                                        key2 = key2[0]
+                                    if key2 in data_maps[k].data_maps and old_data_maps[j].data_maps[key]!=data_maps[k].data_maps[key2]:
+                                        if isinstance(old_data_maps[j].data_maps[key], list) and \
+                                            isinstance(data_maps[k].data_maps[key2], list) and \
+                                            len(old_data_maps[j].data_maps[key])==len(data_maps[k].data_maps[key2]) and \
+                                            set(old_data_maps[j].data_maps[key])==set(data_maps[k].data_maps[key2]):
+                                            continue
+                                        break
+                                else:
+                                    idx_old[j] = k
+                                    idx_new[k] = j
+                                    matches_old[j] = matches_new[k] = True
                                     break
                             else:
                                 idx_old[j] = k
                                 idx_new[k] = j
                                 matches_old[j] = matches_new[k] = True
                                 break
-                            
+                        elif (m:=re.search(r"^(.+)_RACE(/ETHNICITY)?$", old_data_maps[j].orig_column_name)) and \
+                            re.search(rf"^{m.group(1)}_RACE(/ETHNICITY)?$", data_maps[k].orig_column_name):
+                            idx_old[j] = k
+                            idx_new[k] = j
+                            matches_old[j] = matches_new[k] = True
+                            break
                         idx_old[j] = k
                         idx_new[k] = j
                         matches_old[j] = matches_new[k] = False
@@ -232,11 +177,21 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
                         diff_found = True
                         break
                 else:
+                    if (m:=re.search(r"^(.+)_RACE(/ETHNICITY)?$", old_data_maps[j].new_column_name)) and \
+                        any((m:=[re.search(rf"^{m.group(1)}_RACE(/ETHNICITY)?$", x.new_column_name) for x in data_maps])):
+                        k = [n for n,x in enumerate(m) if x][0]
+                        idx_old[j] = k
+                        idx_new[k] = j
+                        matches_old[j] = matches_new[k] = True
+                        continue
                     logger.info("Unmatched old column: ")
                     logger.info(old_data_maps[j])
                     diff_found = True
 
             for k in range(len(data_maps)):
+                if data_maps[k].new_column_name=='ZIP_CODE':
+                    # Ignoring since new
+                    continue
                 if idx_new[k]<0:
                     logger.info("Unmatched new column: ")
                     logger.info(data_maps[k])
@@ -354,7 +309,7 @@ for i in range(istart, len(datasets)):
         years = src.get_years(datasets.iloc[i]["TableType"])
         years.sort(reverse=True)
         load_by_year = True
-    except opd.exceptions.OPD_DataUnavailableError:
+    except (opd.exceptions.OPD_DataUnavailableError, opd.exceptions.OPD_SocrataHTTPError):
         csv_filename = src.get_csv_filename(2023, backup_dir, datasets.iloc[i]["TableType"], 
                     agency=agency)
         csv_filename = csv_filename.replace("2023","*").replace(".csv",".*")
@@ -390,8 +345,8 @@ for i in range(istart, len(datasets)):
             except:
                 raise
             
-            if os.path.exists(zip_filename) or os.path.exists(csv_filename):
-                is_zip = os.path.exists(zip_filename)
+            if load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
+                is_zip = not os.path.exists(csv_filename)
                 try:
                     table = src.load_from_csv(y, table_type=datasets.iloc[i]["TableType"], 
                         agency=agency,output_dir=backup_dir, zip=is_zip)
@@ -403,6 +358,7 @@ for i in range(istart, len(datasets)):
                 if len(table.table)==0:
                     table = src.load(datasets.iloc[i]["TableType"], y,
                             agency=agency)
+                table.to_csv(output_dir=backup_dir)
             elif run_all_years:
                 try:
                     table = src.load(datasets.iloc[i]["TableType"], y,
@@ -420,28 +376,28 @@ for i in range(istart, len(datasets)):
             orig_columns = table.table.columns
             table.standardize(race_cats= "expand", agg_race_cat=True, verbose=verbose, no_id="test")
 
-            # col_map = {}
-            # for x in table.get_transform_map():
-            #     k = ",".join(x.orig_column_name) if isinstance(x.orig_column_name,list) else x.orig_column_name
-            #     col_map[k] = x.new_column_name
+            log_to_json(orig_columns, table.get_transform_map(), csv_filename, 
+                        datasets.iloc[i]["SourceName"], datasets.iloc[i]["TableType"], y)
+            
+            a = copy.deepcopy(table)
+            table.expand(mismatch='splitsingle')
+            a.expand(mismatch='nan')
+            related_table, related_years = src.find_related_tables(table.table_type, table.year)
 
-            # # Check if data in map
-            # if datasets.iloc[i]["State"] not in std_map:
-            #     std_map[datasets.iloc[i]["State"]] = {}
-            # if datasets.iloc[i]["SourceName"] not in std_map[datasets.iloc[i]["State"]]:
-            #     std_map[datasets.iloc[i]["State"]][datasets.iloc[i]["SourceName"]] = {}
-            # if datasets.iloc[i]["TableType"] in std_map[datasets.iloc[i]["State"]][datasets.iloc[i]["SourceName"]]:
-            #     raise NotImplementedError("Need to implement")
-            # else:
-            #     is_accepted = False
-            #     if is_accepted:
-            #         std_map[datasets.iloc[i]["State"]][datasets.iloc[i]["SourceName"]][datasets.iloc[i]["TableType"]] = []
-                    
-            #         std_map[datasets.iloc[i]["State"]][datasets.iloc[i]["SourceName"]][datasets.iloc[i]["TableType"]]
-
-            if table.is_std:
-                log_to_json(orig_columns, table.get_transform_map(), csv_filename, 
-                            datasets.iloc[i]["SourceName"], datasets.iloc[i]["TableType"], y)
+            for rt, ry in zip(related_table, related_years):
+                t2 = src.load(rt, ry)
+                t2.standardize(race_cats= "expand", agg_race_cat=True, verbose=verbose, no_id="test")
+                try:
+                    # Merge incident and subjects tables on their unique ID columns to create 1 row per subject
+                    table2 = table.merge(t2, std_id=True)
+                except opd.exceptions.AutoMergeError as e:
+                    if any([y in table.table.columns for y in ['tax_id','complaint_id','randomized_officer_id','Latitude','Longitude']]) and \
+                        any([y in t2.table.columns for y in ['tax_id','complaint_id','randomized_officer_id','Latitude','Longitude']]):
+                        continue
+                    else:
+                        raise
+                except:
+                    raise
                     
             if not run_all_years:
                 break
@@ -449,8 +405,8 @@ for i in range(istart, len(datasets)):
         csv_filename = src.get_csv_filename(datasets.iloc[i]["Year"], backup_dir, datasets.iloc[i]["TableType"], 
                     agency=agency)
         zip_filename = csv_filename.replace(".csv",".zip")
-        if os.path.exists(csv_filename) or os.path.exists(zip_filename):
-            is_zip = os.path.exists(zip_filename)
+        if load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
+            is_zip = not os.path.exists(csv_filename)
             table = src.load_from_csv(datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
                 agency=agency,output_dir=backup_dir, zip=is_zip)
         else:
@@ -468,6 +424,26 @@ for i in range(istart, len(datasets)):
 
         log_to_json(orig_columns, table.get_transform_map(), csv_filename, 
                     datasets.iloc[i]["SourceName"], datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"])
+        
+        a = copy.deepcopy(table)
+        a.expand(mismatch='nan')
+        table.expand(mismatch='splitsingle')
+        related_table, related_years = src.find_related_tables(table.table_type, table.year)
+        for rt, ry in zip(related_table, related_years):
+            t2 = src.load(rt, ry)
+            t2.standardize(race_cats= "expand", agg_race_cat=True, verbose=verbose, no_id="test")
+            try:
+                # Merge incident and subjects tables on their unique ID columns to create 1 row per subject
+                table2 = table.merge(t2, std_id=True)
+            except ValueError as e:
+                if len(e.args)>0 and e.args[0]=='No incident ID column found' and \
+                    src["SourceName"]=='Charlotte-Mecklenburg':
+                    # Dataset has no incident ID column. Latitude/longitude seems to work instead
+                    table2 = table.merge(t2, on=['Latitude','Longitude'])
+                else:
+                    raise
+            except:
+                raise
     
 
 logger.info("Complete")
