@@ -15,6 +15,7 @@ else:
     sys.path.append(os.path.join("..","..","openpolicedata"))
     output_dir = os.path.join("..","data","backup")
 import openpolicedata as opd
+from openpolicedata import defs
 
 backup_dir = output_dir
 output_dir = os.path.join(output_dir, 'standardization')
@@ -22,16 +23,7 @@ output_dir = os.path.join(output_dir, 'standardization')
 if not os.path.exists(output_dir):
     raise FileNotFoundError(f"Output directory {output_dir} does not exist")
 
-# pd.to_datetime(x, errors='ignore')
-#601: Sparks?
-# FutureWarning: 'A-DEC' is deprecated and will be removed in a future version, please use 'Y-DEC' instead.
-# 605: NJ State Police
-# C:\Users\matth\repos\openpolicedata\..\openpolicedata\openpolicedata\datetime_parser.py:22: FutureWarning: Setting an item of incompatible dtype is deprecated and will raise in a future error of pandas. Value '0         2020
-# Name: year, Length: 398929, dtype: int64' has dtype incompatible with period[Y-DEC], please explicitly cast to a compatible dtype first.
-#   d.iloc[:,0] = date_col.iloc[:,0].dt.year
-# Tucson OIS
-#  FutureWarning: In a future version of pandas, parsing datetimes with mixed time zones will raise an error unless `utc=True`. Please specify `utc=True` to opt in to the new behaviour and silence this warning. To create a `Series` with mixed offsets and `object` dtype, please use `apply` and `datetime.datetime.strptime`
-istart = 745
+istart = 885
 
 csvfile = None
 csvfile = r"..\opd-data\opd_source_table.csv"
@@ -39,6 +31,8 @@ run_all_stanford = False
 run_all_years = True
 run_all_agencies = True  # Run all agencies for multi-agency cases
 force_load_from_url = False
+only_related_tables = False
+table_to_run = None
 load_if_date_before = '01/28/2024'
 verbose = False
 allowed_updates = []
@@ -72,7 +66,7 @@ def load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filenam
             (os.path.exists(csv_filename) and \
              pd.to_datetime(os.path.getmtime(csv_filename), unit='s', origin='unix')>=pd.to_datetime(load_if_date_before)))
 
-prev_columns = []
+prev_columns = {}
 prev_maps = {}
 def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, year):
     pkl_filename_wc = os.path.basename(csv_filename).replace(".csv","*.pkl")
@@ -189,9 +183,6 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
                     diff_found = True
 
             for k in range(len(data_maps)):
-                if data_maps[k].new_column_name=='ZIP_CODE':
-                    # Ignoring since new
-                    continue
                 if idx_new[k]<0:
                     logger.info("Unmatched new column: ")
                     logger.info(data_maps[k])
@@ -208,23 +199,22 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
     logger.debug(f"Original columns:\n{orig_columns}")
     
     # Skip if shown before
-    same_table = prev_columns[0]==source_name and prev_columns[1]==table_type if len(prev_columns)>0 else False
+    same_table = prev_columns['source']==source_name and prev_columns['table']==table_type if len(prev_columns)>0 else False
     all_orig = [map.orig_column_name for map in data_maps]
     all_new = [map.new_column_name for map in data_maps]
     if not same_table or \
-        all_orig!=prev_columns[2] or all_new!=prev_columns[3]:
+        all_orig!=prev_columns['orig_cols'] or all_new!=prev_columns['new_cols']:
         msg = "Identified columns:\n"
         for map in data_maps:
             msg+=f"\t{map.orig_column_name}: {map.new_column_name}\n"
-
-        [prev_columns.pop() for _ in range(len(prev_columns))]
-        prev_columns.append(source_name)
-        prev_columns.append(table_type)
-        prev_columns.append(all_orig)
-        prev_columns.append(all_new)
-        prev_columns.append(dict())
-    
+        
         logger.debug(msg)
+
+        prev_columns['source'] =source_name
+        prev_columns['table'] = table_type
+        prev_columns['orig_cols'] = all_orig
+        prev_columns['new_cols'] = all_new
+        prev_columns['data'] = dict()
     else:
         logger.debug("Same column mapping as previously run case\n")
 
@@ -232,16 +222,17 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
     for map in data_maps:
         # if same_table and map.data_maps is not None:
         if map.data_maps is not None:
-            if map.orig_column_name not in prev_columns[-1]:
-                prev_columns[-1][map.orig_column_name] = dict()
+            key = str(map.orig_column_name)
+            if key not in prev_columns['data']:
+                prev_columns['data'][key] = dict()
             map_copy = copy.deepcopy(map)
             for k,v in map.data_maps.items():
-                if k in prev_columns[-1][map.orig_column_name]:
-                    if prev_columns[-1][map.orig_column_name][k] != v:
-                        raise ValueError(f"Value of {k} in column {map.orig_column_name} expected to map to {prev_columns[-1][map.orig_column_name][k]} but actually maps to {v}")
+                if k in prev_columns['data'][key]:
+                    if prev_columns['data'][key][k] != v:
+                        raise ValueError(f"Value of {k} in column {map.orig_column_name} expected to map to {prev_columns['data'][key][k]} but actually maps to {v}")
                     map_copy.data_maps.pop(k)
                 else:
-                    prev_columns[-1][map.orig_column_name][k] = v
+                    prev_columns['data'][key][k] = v
             map = map_copy
                     
         msg+=f"{map}\n\n"
@@ -297,10 +288,21 @@ for i in range(istart, len(datasets)):
     prev_states.append(datasets.iloc[i]["State"])
 
     table_print = datasets.iloc[i]["TableType"]
+
+    if table_to_run and datasets.iloc[i]["TableType"] not in table_to_run:
+        logger.info(f"Not in tables to run. Skipping index {i} of {len(datasets)}: {srcName} {table_print} table")
+        continue
+
     now = datetime.now().strftime("%d.%b %Y %H:%M:%S")
     logger.info(f"{now} Running index {i} of {len(datasets)}: {srcName} {table_print} table")
 
     src = opd.Source(srcName, state=state)
+
+    if only_related_tables:
+        related_table, related_years = src.find_related_tables(table_print, datasets.iloc[i]["Year"])
+        if len(related_table)==0:
+            logger.info("SKIPPING TABLE WITH NO RELATED TABLES")
+            continue
 
     year = date.today().year
     table = None
@@ -363,7 +365,7 @@ for i in range(istart, len(datasets)):
                 try:
                     table = src.load(datasets.iloc[i]["TableType"], y,
                             agency=agency)
-                except opd.exceptions.OPD_FutureError:
+                except (opd.exceptions.OPD_FutureError, opd.exceptions.OPD_DataUnavailableError):
                     continue
                 except:
                     raise
@@ -385,7 +387,10 @@ for i in range(istart, len(datasets)):
             related_table, related_years = src.find_related_tables(table.table_type, table.year)
 
             for rt, ry in zip(related_table, related_years):
-                t2 = src.load(rt, ry)
+                try:
+                    t2 = src.load(rt, ry)
+                except opd.exceptions.OPD_DataUnavailableError:
+                    continue
                 t2.standardize(race_cats= "expand", agg_race_cat=True, verbose=verbose, no_id="test")
                 try:
                     # Merge incident and subjects tables on their unique ID columns to create 1 row per subject
@@ -403,16 +408,16 @@ for i in range(istart, len(datasets)):
                 break
     else:
         csv_filename = src.get_csv_filename(datasets.iloc[i]["Year"], backup_dir, datasets.iloc[i]["TableType"], 
-                    agency=agency)
+                    agency=agency, url_contains=datasets.iloc[i]['URL'])
         zip_filename = csv_filename.replace(".csv",".zip")
         if load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
             is_zip = not os.path.exists(csv_filename)
             table = src.load_from_csv(datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
-                agency=agency,output_dir=backup_dir, zip=is_zip)
+                agency=agency,output_dir=backup_dir, zip=is_zip, url_contains=datasets.iloc[i]['URL'])
         else:
             try:
                 table = src.load(datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"], 
-                        agency=agency)
+                        agency=agency, url_contains=datasets.iloc[i]['URL'])
             except opd.exceptions.OPD_FutureError:
                 continue
             except:
