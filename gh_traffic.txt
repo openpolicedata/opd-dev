@@ -1,0 +1,8 @@
+https://docs.github.com/en/rest/metrics/traffic?apiVersion=2022-11-28#get-page-views
+
+conda activate gh
+gh auth login
+gh api --method GET /repos/openpolicedata/openpolicedata/traffic/clones --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' > ~/repos/openpolicedata/data/github/clones_20240527.txt
+gh api --method GET /repos/openpolicedata/openpolicedata/traffic/views --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' > ~/repos/openpolicedata/data/github/views_20240527.txt
+gh api --method GET /repos/openpolicedata/openpolicedata/traffic/popular/paths --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' > ~/repos/openpolicedata/data/github/popular_paths_20240527.txt
+gh api --method GET /repos/openpolicedata/openpolicedata/traffic/popular/referrers --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' > ~/repos/openpolicedata/data/github/popular_referrers_20240527.txt
