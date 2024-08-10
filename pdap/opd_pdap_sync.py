@@ -10,8 +10,6 @@ from sodapy import Socrata
 
 from pdap_utils import update_pdap_change_type, sodapy_key, test_url, extract_socrata_id_from_url, strip_https_www
 
-import stanford
-
 if os.path.basename(os.getcwd()) == "openpolicedata":
     opd_dir = os.path.join("..","openpolicedata")
     output_dir = os.path.join(".","data","pdap")
@@ -24,8 +22,6 @@ import openpolicedata as opd
 assert os.path.exists(output_dir)
 
 kstart = 104
-
-df_stanford = stanford.get_stanford()
 
 us_state_to_abbrev = {"Alabama": "AL","Alaska": "AK","Arizona": "AZ","Arkansas": "AR","California": "CA","Colorado": "CO","Connecticut": "CT",
     "Delaware": "DE","Florida": "FL","Georgia": "GA","Hawaii": "HI","Idaho": "ID","Illinois": "IL","Indiana": "IN","Iowa": "IA","Kansas": "KS",
