@@ -6,10 +6,8 @@ import pandas as pd
 
 if os.path.basename(os.getcwd()) == "openpolicedata":
     opd_dir = os.path.join("..","openpolicedata")
-    output_dir = os.path.join(".","data","pdap")
 else:
     opd_dir = os.path.join("..","..","openpolicedata")
-    output_dir = os.path.join("..","data","pdap")
 sys.path.append(opd_dir)
 import openpolicedata as opd
 
@@ -18,7 +16,8 @@ import opd2pdap
 import opd_consolidation
 from pdap_utils import test_url, strip_https_www
 
-assert os.path.exists(output_dir)
+pdap_csv_file = r"C:\Users\matth\repos\openpolicedata\data\pdap\PDAP Data Sources_20240824.csv"
+output_dir = os.path.dirname(pdap_csv_file)
 
 kstart = 0
 
@@ -33,7 +32,7 @@ df_deleted = pd.read_csv(opd_deleted_file)
 
 orig_cols = df_opd_orig.columns
 
-df_pdap_all = pd.read_csv(os.path.join(output_dir,'PDAP Data Sources_20240705.csv'))
+df_pdap_all = pd.read_csv(pdap_csv_file)
 
 # Only keep Individual record data
 df_pdap = df_pdap_all[~df_pdap_all["detail_level"].isin(['Summarized totals','Aggregated records'])]
@@ -88,19 +87,24 @@ columns = ['state', 'SourceName', 'Agency','AgencyFull','record_type', 'DataType
             'agency_supplied', 'update_agency_supplied',
             'detail_level', 'update_detail_level', 
             'update_stanford_not_aggregated', 
-            'source_url_type', 'airtable_uid', 
+            'airtable_uid', 
            ]
 
 columns = [x for x in columns if x in df_opd]
-assert all(x in columns for x in df_opd.columns if x not in orig_cols and x not in ['api_url_all', 'source_url_all'])
+assert all(x in columns for x in df_opd.columns if x not in orig_cols and x not in ['api_url_all', 'source_url_all','source_url_type'])
 
 df_opd = df_opd[columns]
 
 drop_check_cols = [x for x in columns if x=='new' or x.startswith('update_')]
 df_opd = df_opd.dropna(subset=drop_check_cols, how='all')
 
+is_new = (df_opd['new']==True) | (df_opd['stanford_new']==True)
+
+output_file = os.path.join(output_dir, "Possible_PDAP_New_Datasets_"+datetime.now().strftime("%Y%m%d_%H%M%S")+".csv")
+df_opd[is_new].to_csv(output_file, index=False)
+
 output_file = os.path.join(output_dir, "Possible_PDAP_Updates_"+datetime.now().strftime("%Y%m%d_%H%M%S")+".csv")
-df_opd.to_csv(output_file, index=False)
+df_opd[~is_new].to_csv(output_file, index=False)
 
 # TODO: Add code standardizing OPD scraper_url info
 # TODO: Incident Reports record type is a catch all with many corrections needed

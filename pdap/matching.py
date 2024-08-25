@@ -79,16 +79,16 @@ def match_multi(df_pdap, df_opd, k):
         df_opd = compare_values(pdap_matches, df_opd, k)
 
         if (pdap_matches['agency_originated'] != "yes").any():
-            df_opd.loc[k, 'update_agency_originated'] = "newvalue: yes"
+            df_opd.loc[k, 'update_agency_originated'] = pdap_matches['agency_originated'] if pd.notnull(pdap_matches['agency_originated']).all() else "NULL"
 
         if (pdap_matches['agency_supplied'] != "no").any():
-            df_opd.loc[k, 'update_agency_supplied'] = "newvalue: no"
+            df_opd.loc[k, 'update_agency_supplied'] = pdap_matches['agency_supplied'] if pd.notnull(pdap_matches['agency_supplied']).all() else "NULL"
 
         if (pdap_matches['agency_aggregation'] != "state").any():
-            df_opd.loc[k, 'update_agency_aggregation'] = "state"
+            df_opd.loc[k, 'update_agency_aggregation'] = pdap_matches['agency_aggregation'] if pd.notnull(pdap_matches['agency_aggregation']).all() else "NULL"
 
         if (pdap_matches['supplying_entity'] != df_opd.loc[k, "supplying_entity"]).any():
-            df_opd.loc[k, 'update_supplying_entity'] = df_opd.loc[k, "supplying_entity"]
+            df_opd.loc[k, 'update_supplying_entity'] = pdap_matches['supplying_entity'] if pd.notnull(pdap_matches['supplying_entity']).all() else "NULL"
 
         df_opd.loc[k, 'airtable_uid'] = ', '.join(pdap_matches['airtable_uid'].tolist())
     
@@ -174,22 +174,22 @@ def compare_values(pdap_matches, df_opd, k):
                 else:
                     raise NotImplementedError()
             elif df_opd.loc[k, "DataType"]=='Socrata' and extract_socrata_id_from_url(pdap_matches.iloc[0]['source_url']):
-                df_opd.loc[k, 'update_access_type'] = True  # Clearly Socrata API
+                df_opd.loc[k, 'update_access_type'] = 'NULL'  # Clearly Socrata API
             else:
                 raise NotImplementedError()
             
         if pdap_matches.iloc[0]['data_portal_type'] != df_opd.loc[k, "data_portal_type"] and \
             not (pdap_matches['data_portal_type'].isnull().iloc[0] and df_opd.loc[k, 'data_portal_type']==''):
             if bad_url.all():
-                df_opd.loc[k, 'update_data_portal_type'] = True
+                df_opd.loc[k, 'update_data_portal_type'] = pdap_matches.iloc[0]['data_portal_type'] if pd.notnull(pdap_matches.iloc[0]['data_portal_type']) else "NULL"
             elif pd.isnull(pdap_matches.iloc[0]['data_portal_type']) and (
                     (df_opd.loc[k, "data_portal_type"]=='Socrata' and extract_socrata_id_from_url(pdap_matches.iloc[0]['source_url'])) or \
                     (df_opd.loc[k, "data_portal_type"]=='ArcGIS' and 'arcgis' in pdap_matches.iloc[0]['source_url'].lower())) :
-                df_opd.loc[k, 'update_data_portal_type'] = True  # PDAP URL is definitely from data portal
+                df_opd.loc[k, 'update_data_portal_type'] = "JULL"  # PDAP URL is definitely from data portal
             elif pd.isnull(pdap_matches.iloc[0]['data_portal_type']) and 'API' in df_opd.loc[k, "access_type"].split(',') and \
                 ((m1:=re.search(r'[\w\.]+/',pdap_matches.iloc[0]['source_url'])) and (m2:=re.search(r'[\w\.]+/',df_opd.loc[k, "source_url"])) and \
                 re.sub(r'www\d?\.','',m1.group(0))==re.sub(r'www\d?\.','',m2.group(0))):
-                df_opd.loc[k, 'update_data_portal_type'] = True  # PDAP URL is from same website as OPD
+                df_opd.loc[k, 'update_data_portal_type'] = "JULL"  # PDAP URL is from same website as OPD
             elif df_opd.loc[k, "data_portal_type"]=='ArcGIS':
                 # Check if website has Arcgis datasets
                 m = re.search(r'.+\.(com|gov|org)/',pdap_matches.iloc[0]['source_url'])
@@ -200,7 +200,8 @@ def compare_values(pdap_matches, df_opd, k):
                 ds_url = f'https://hub.arcgis.com/api/feed/all/csv?target={target_url}'
                 try:
                     df_ds = pd.read_csv(ds_url)
-                    df_opd.loc[k, 'update_data_portal_type'] = True  # PDAP URL is definitely from data portal
+                    # PDAP URL is definitely from data portal
+                    df_opd.loc[k, 'update_data_portal_type'] = pdap_matches.iloc[0]['data_portal_type'] if pd.notnull(pdap_matches.iloc[0]['data_portal_type']) else "NULL" 
                 except:
                     raise NotImplementedError()
             elif pdap_matches['data_portal_type'].iloc[0].lower() in df_opd.loc[k,'source_url']:
@@ -229,7 +230,7 @@ def compare_values(pdap_matches, df_opd, k):
             
         if pdap_matches.iloc[0]['detail_level'] != 'Individual record':
             if pd.isnull(pdap_matches.iloc[0]['detail_level'] ):
-                df_opd.loc[k, 'update_detail_level'] = True
+                df_opd.loc[k, 'update_detail_level'] = pdap_matches.iloc[0]['detail_level'] if pd.notnull(pdap_matches.iloc[0]['detail_level']) else "NULL"
             else:
                 raise NotImplementedError()
 
@@ -316,9 +317,9 @@ def compare_urls(pdap_matches, df_opd, k):
         if any(['raw.githubusercontent.com/openpolicedata' in x for x in opd_api_urls]):
             if not is_github_url.any():
                 df_opd.loc[k, 'OPD Posted Removed Data'] = True
-                df_opd.loc[k, "update_agency_originated"] = "newvalue: yes"
-                df_opd.loc[k, "update_agency_supplied"] = "newvalue: no"
-                df_opd.loc[k, "update_supplying_entity"] = "OpenPoliceData"
+                df_opd.loc[k, "agency_originated"] = "Yes"
+                df_opd.loc[k, "agency_supplied"] = "No"
+                df_opd.loc[k, "supplying_entity"] = "OpenPoliceData"
             else:
                 raise NotImplementedError()
     
