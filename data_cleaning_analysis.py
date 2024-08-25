@@ -2,6 +2,8 @@ import copy
 import re
 import os
 import pickle
+import random
+from rapidfuzz import fuzz
 import sys
 from datetime import date
 import logging
@@ -17,7 +19,6 @@ else:
     output_dir = os.path.join("..","data","backup")
     output_dir = os.path.join("..","data","tests")
 import openpolicedata as opd
-from openpolicedata import defs
 import test_utils
 
 backup_dir = output_dir
@@ -26,11 +27,11 @@ output_dir = os.path.join(output_dir, 'standardization')
 if not os.path.exists(output_dir):
     raise FileNotFoundError(f"Output directory {output_dir} does not exist")
 
-istart = 984
+istart = 0
 
-use_changed_rows = False
+use_changed_rows = True
 csvfile = None
-# csvfile = r"..\opd-data\opd_source_table.csv"
+csvfile = r"..\opd-data\opd_source_table.csv"
 run_all_stanford = False
 run_all_years = True
 run_all_agencies = True  # Run all agencies for multi-agency cases
@@ -40,6 +41,7 @@ table_to_run = None
 load_if_date_before = '01/28/2024'
 verbose = False
 allowed_updates = []
+perc_update = 0.2
 
 skip_sources = []
 logger = logging.getLogger("opd")
@@ -56,8 +58,10 @@ logger.addHandler(sh)
 logger.setLevel(logging.DEBUG)
 
 if use_changed_rows:
-    datasets = test_utils.get_datasets(csvfile, use_changed_rows)
-    opd.datasets.reload(datasets)
+    changed_datasets = test_utils.get_datasets(csvfile, use_changed_rows)
+    if not csvfile:
+        raise ValueError("CSV file currently must be set")
+    opd.datasets.reload(csvfile)
 elif csvfile:
     opd.datasets.reload(csvfile)
 datasets = opd.datasets.query()
@@ -256,6 +260,9 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
 
 num_stanford = 0
 for i in range(istart, len(datasets)):
+    if use_changed_rows and not changed_datasets.apply(lambda x: pd.Series(x.to_dict()).equals(pd.Series(datasets.iloc[i].to_dict())), axis=1).any():
+        continue
+
     if "stanford.edu" in datasets.iloc[i]["URL"]:
         num_stanford += 1
         if num_stanford > max_num_stanford or datasets.iloc[i]["SourceName"]==datasets.iloc[i]["State"] or \
@@ -322,12 +329,14 @@ for i in range(istart, len(datasets)):
 
     csv_add_on = False
     if  datasets.iloc[i]["Year"]==opd.defs.MULTI:
-        ds_filtered, _ = src._Source__filter_for_source(datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"], None, errors=False)
+        ds_filtered, _ = src._Source__filter_for_source(datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"], None, None, errors=False)
         if isinstance(ds_filtered, pd.DataFrame):
             not_match = ds_filtered.apply(lambda x: not x.equals(datasets.iloc[i]), axis=1)
             unique_url = []
+            sim = []
             for k in not_match[not_match].index:
                 unurl = ''
+                sim.append(fuzz.partial_ratio(datasets.iloc[i]['URL'], ds_filtered.loc[k,'URL']))
                 for j in range(len(datasets.iloc[i]['URL'])):
                     if j < len(ds_filtered.loc[k,'URL']):
                         if ds_filtered.loc[k,'URL'][j]!=datasets.iloc[i]['URL'][j]:
@@ -337,7 +346,7 @@ for i in range(istart, len(datasets)):
                         break
                 unique_url.append(unurl)
             
-            assert len(unique_url)==1  # Will deal with multi-case later
+            unique_url = [x for x,y in zip(unique_url, sim) if y==max(sim)]
             csv_add_on = unique_url[0].replace('/','_')
             csv_add_on = csv_add_on[:min(len(csv_add_on),10)]
 
@@ -349,7 +358,7 @@ for i in range(istart, len(datasets)):
             logger.info(f"Year: {y}")
             try:
                 csv_filename = src.get_csv_filename(y, backup_dir, datasets.iloc[i]["TableType"], 
-                    agency=agency, url_contains=datasets.iloc[i]['URL'])
+                    agency=agency, url_contains=datasets.iloc[i]['URL'], id_contains=datasets.iloc[i]['dataset_id'])
             except ValueError as e:
                 if "There are no sources matching tableType" in e.args[0]:
                     continue
@@ -362,11 +371,13 @@ for i in range(istart, len(datasets)):
                 csv_filename = csv_filename.replace(".csv","_"+csv_add_on+".csv")
             zip_filename = csv_filename.replace(".csv",".zip")
             
-            if load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
+            load_new = random.random() < perc_update
+            if not load_new and load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
                 is_zip = not os.path.exists(csv_filename)
                 try:
                     table = src.load_from_csv(y, table_type=datasets.iloc[i]["TableType"], 
                         agency=agency,output_dir=backup_dir, zip=is_zip, url_contains=datasets.iloc[i]['URL'], 
+                        id_contains=datasets.iloc[i]['dataset_id'], 
                         filename=os.path.basename(csv_filename))
                 except pd.errors.EmptyDataError:
                     continue
@@ -380,8 +391,8 @@ for i in range(istart, len(datasets)):
             elif run_all_years:
                 try:
                     table = src.load(datasets.iloc[i]["TableType"], y,
-                            agency=agency,  url_contains=datasets.iloc[i]['URL'])
-                except (opd.exceptions.OPD_FutureError, opd.exceptions.OPD_DataUnavailableError):
+                            agency=agency,  url_contains=datasets.iloc[i]['URL'], id_contains=datasets.iloc[i]['dataset_id'])
+                except (opd.exceptions.OPD_FutureError, opd.exceptions.OPD_DataUnavailableError, opd.exceptions.OPD_SocrataHTTPError):
                     continue
                 except:
                     raise
@@ -404,8 +415,12 @@ for i in range(istart, len(datasets)):
 
             for rt, ry in zip(related_table, related_years):
                 try:
-                    t2 = src.load(rt, ry)
-                except opd.exceptions.OPD_DataUnavailableError:
+                    related_ds = src.datasets[(src.datasets['TableType']==rt) & (src.datasets['Year']==ry)]
+                    if len(related_ds)==1 and pd.notnull(related_ds.iloc[0]['date_field']) and y!="NONE":
+                        t2 = src.load(rt, y)
+                    else:
+                        t2 = src.load(rt, ry)
+                except (opd.exceptions.OPD_DataUnavailableError, opd.exceptions.OPD_SocrataHTTPError):
                     continue
                 t2.standardize(race_cats= "expand", agg_race_cat=True, verbose=verbose, no_id="test")
                 try:
@@ -424,16 +439,17 @@ for i in range(istart, len(datasets)):
                 break
     else:
         csv_filename = src.get_csv_filename(datasets.iloc[i]["Year"], backup_dir, datasets.iloc[i]["TableType"], 
-                    agency=agency, url_contains=datasets.iloc[i]['URL'])
+                    agency=agency, url_contains=datasets.iloc[i]['URL'], id_contains=datasets.iloc[i]['dataset_id'])
         zip_filename = csv_filename.replace(".csv",".zip")
-        if load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
+        load_new = random.random() < perc_update
+        if not load_new and load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
             is_zip = not os.path.exists(csv_filename)
             table = src.load_from_csv(datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
-                agency=agency,output_dir=backup_dir, zip=is_zip, url_contains=datasets.iloc[i]['URL'])
+                agency=agency,output_dir=backup_dir, zip=is_zip, url_contains=datasets.iloc[i]['URL'], id_contains=datasets.iloc[i]['dataset_id'])
         else:
             try:
                 table = src.load(datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"], 
-                        agency=agency, url_contains=datasets.iloc[i]['URL'])
+                        agency=agency, url_contains=datasets.iloc[i]['URL'], id_contains=datasets.iloc[i]['dataset_id'])
             except opd.exceptions.OPD_FutureError:
                 continue
             except:
