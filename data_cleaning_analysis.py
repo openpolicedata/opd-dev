@@ -9,6 +9,7 @@ from datetime import date
 import logging
 from glob import glob
 import pandas as pd
+import warnings
 from datetime import datetime
 if os.path.basename(os.getcwd()) == "openpolicedata":
     sys.path.append(os.path.join("..","openpolicedata"))
@@ -16,8 +17,9 @@ if os.path.basename(os.getcwd()) == "openpolicedata":
     output_dir = os.path.join(".","data","backup")
 else:
     sys.path.append(os.path.join("..","..","openpolicedata"))
+    sys.path.append(os.path.join("..",'tests'))
     output_dir = os.path.join("..","data","backup")
-    output_dir = os.path.join("..","data","tests")
+    
 import openpolicedata as opd
 import test_utils
 
@@ -27,24 +29,30 @@ output_dir = os.path.join(output_dir, 'standardization')
 if not os.path.exists(output_dir):
     raise FileNotFoundError(f"Output directory {output_dir} does not exist")
 
-istart = 0
+istart = 1325
 
-use_changed_rows = True
+use_changed_rows = False
 csvfile = None
 csvfile = r"..\opd-data\opd_source_table.csv"
+exclude_url = ['data-openjustice','stanford']
+min_year = 2000
 run_all_stanford = False
 run_all_years = True
 run_all_agencies = True  # Run all agencies for multi-agency cases
 force_load_from_url = False
-only_related_tables = False
 table_to_run = None
 load_if_date_before = '01/28/2024'
 verbose = False
 allowed_updates = []
 perc_update = 0.2
 
+if csvfile and not os.path.exists(csvfile):
+    csvfile = os.path.join('..',csvfile)
+if csvfile:
+    assert os.path.exists(csvfile)
+
 skip_sources = []
-logger = logging.getLogger("opd")
+logger = logging.getLogger("opd_clean")
 sh = logging.StreamHandler()
 fh = logging.FileHandler(os.path.join(output_dir, f'std_log_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'))
 format = logging.Formatter("%(asctime)s :: %(message)s", '%y-%m-%d %H:%M:%S') 
@@ -84,6 +92,13 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
     pkl_filename_in = glob(os.path.join(output_dir, pkl_filename_wc))
     pkl_filename_out = os.path.join(output_dir, 
                  os.path.basename(csv_filename).replace(".csv","") + f"_{datetime.now().strftime('%Y%m%d')}_pd{pd.__version__.replace('.','_')}.pkl")
+    is_last_year = False
+    if len(pkl_filename_in)==0 and csv_filename.endswith(f"_{datetime.now().year}.csv"):
+        # Compare to last year
+        pkl_filename_wc = os.path.basename(csv_filename).replace(".csv","*.pkl").replace(f"_{datetime.now().year}", f"_{datetime.now().year-1}")
+        pkl_filename_in = glob(os.path.join(output_dir, pkl_filename_wc))
+        is_last_year = len(pkl_filename_in)>0
+
     if len(pkl_filename_in)>1:
         for p in pkl_filename_in[:-1]:
             os.remove(p)
@@ -165,7 +180,8 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
                                 idx_new[k] = j
                                 matches_old[j] = matches_new[k] = True
                                 break
-                        elif (m:=re.search(r"^(.+)_RACE(/ETHNICITY)?$", old_data_maps[j].orig_column_name)) and \
+                        elif isinstance(old_data_maps[j].orig_column_name,str) and \
+                            (m:=re.search(r"^(.+)_RACE(/ETHNICITY)?$", old_data_maps[j].orig_column_name)) and \
                             re.search(rf"^{m.group(1)}_RACE(/ETHNICITY)?$", data_maps[k].orig_column_name):
                             idx_old[j] = k
                             idx_new[k] = j
@@ -199,11 +215,18 @@ def log_to_json(orig_columns, data_maps, csv_filename, source_name, table_type, 
                     logger.info(data_maps[k])
                     diff_found = True
 
+            if diff_found and is_last_year:
+                logger.info('****COMPARING TO LAST YEAR*****')
+
             raise_error = True
+            if 'CRASHES' in table_type:
+                warnings.warn('Skipping crashes tables because of demograhics std change')
+                raise_error = False
             if diff_found and raise_error:
                 raise ValueError(f"Check {pkl_filename_in[0]}!")
             elif not diff_found:
-                [os.remove(x) for x in pkl_filename_in]
+                if not is_last_year:
+                    [os.remove(x) for x in pkl_filename_in]
                 pickle.dump(data_maps, open(pkl_filename_out, "wb"))
                 return
     
@@ -263,6 +286,9 @@ for i in range(istart, len(datasets)):
     if use_changed_rows and not changed_datasets.apply(lambda x: pd.Series(x.to_dict()).equals(pd.Series(datasets.iloc[i].to_dict())), axis=1).any():
         continue
 
+    if any(x in datasets.iloc[i]["URL"] for x in exclude_url):
+        continue
+
     if "stanford.edu" in datasets.iloc[i]["URL"]:
         num_stanford += 1
         if num_stanford > max_num_stanford or datasets.iloc[i]["SourceName"]==datasets.iloc[i]["State"] or \
@@ -294,13 +320,7 @@ for i in range(istart, len(datasets)):
     now = datetime.now().strftime("%d.%b %Y %H:%M:%S")
     logger.info(f"{now} Running index {i} of {len(datasets)}: {srcName} {table_print} table")
 
-    src = opd.Source(srcName, state=state)
-
-    if only_related_tables:
-        related_table, related_years = src.find_related_tables(table_print, datasets.iloc[i]["Year"])
-        if len(related_table)==0:
-            logger.info("SKIPPING TABLE WITH NO RELATED TABLES")
-            continue
+    src = opd.Source(srcName, state=state, agency=datasets.iloc[i]["Agency"])
 
     year = date.today().year
     table = None
@@ -324,7 +344,7 @@ for i in range(istart, len(datasets)):
             raise
         load_by_year = False
 
-    if ".zip" in datasets.iloc[i]["URL"] and datasets.iloc[i]["Year"]==opd.defs.MULTI:
+    if (".zip" in datasets.iloc[i]["URL"] or pd.isnull(datasets.iloc[i]["date_field"])) and datasets.iloc[i]["Year"]==opd.defs.MULTI:
         load_by_year = False
 
     csv_add_on = False
@@ -344,6 +364,12 @@ for i in range(istart, len(datasets)):
                     else:
                         unurl += datasets.iloc[i]['URL'][j:]
                         break
+                
+                if len(unurl)==0:
+                    assert pd.notnull(datasets.iloc[i]['dataset_id'])
+                    # These differ by dataset ID
+                    unurl = datasets.iloc[i]['dataset_id'].split('.')[0]
+                    
                 unique_url.append(unurl)
             
             unique_url = [x for x,y in zip(unique_url, sim) if y==max(sim)]
@@ -351,6 +377,7 @@ for i in range(istart, len(datasets)):
             csv_add_on = csv_add_on[:min(len(csv_add_on),10)]
 
     if load_by_year:
+        years = [y for y in years if y>=min_year]
         for y in years:
             if any([x==srcName and (t==datasets.iloc[i]["TableType"] or t=="ALL") and (z==y or z=="ALL") for x,t,z in skip_sources]):
                 logger.info(f"Skipping year {y}")
@@ -358,7 +385,7 @@ for i in range(istart, len(datasets)):
             logger.info(f"Year: {y}")
             try:
                 csv_filename = src.get_csv_filename(y, backup_dir, datasets.iloc[i]["TableType"], 
-                    agency=agency, url_contains=datasets.iloc[i]['URL'], id_contains=datasets.iloc[i]['dataset_id'])
+                    agency=agency, url=datasets.iloc[i]['URL'], id=datasets.iloc[i]['dataset_id'])
             except ValueError as e:
                 if "There are no sources matching tableType" in e.args[0]:
                     continue
@@ -371,13 +398,13 @@ for i in range(istart, len(datasets)):
                 csv_filename = csv_filename.replace(".csv","_"+csv_add_on+".csv")
             zip_filename = csv_filename.replace(".csv",".zip")
             
-            load_new = random.random() < perc_update
+            load_new = random.random() < perc_update if datasets.iloc[i]["TableType"]!='TRAFFIC STOPS' or datasets.iloc[i]["SourceName"]!='St. Paul' else True
             if not load_new and load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
                 is_zip = not os.path.exists(csv_filename)
                 try:
                     table = src.load_from_csv(y, table_type=datasets.iloc[i]["TableType"], 
-                        agency=agency,output_dir=backup_dir, zip=is_zip, url_contains=datasets.iloc[i]['URL'], 
-                        id_contains=datasets.iloc[i]['dataset_id'], 
+                        agency=agency,output_dir=backup_dir, zip=is_zip, url=datasets.iloc[i]['URL'], 
+                        id=datasets.iloc[i]['dataset_id'], 
                         filename=os.path.basename(csv_filename))
                 except pd.errors.EmptyDataError:
                     continue
@@ -391,7 +418,7 @@ for i in range(istart, len(datasets)):
             elif run_all_years:
                 try:
                     table = src.load(datasets.iloc[i]["TableType"], y,
-                            agency=agency,  url_contains=datasets.iloc[i]['URL'], id_contains=datasets.iloc[i]['dataset_id'])
+                            agency=agency,  url=datasets.iloc[i]['URL'], id=datasets.iloc[i]['dataset_id'])
                 except (opd.exceptions.OPD_FutureError, opd.exceptions.OPD_DataUnavailableError, opd.exceptions.OPD_SocrataHTTPError):
                     continue
                 except:
@@ -408,7 +435,9 @@ for i in range(istart, len(datasets)):
             log_to_json(orig_columns, table.get_transform_map(), csv_filename, 
                         datasets.iloc[i]["SourceName"], datasets.iloc[i]["TableType"], y)
             
-            a = copy.deepcopy(table)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore",category=DeprecationWarning, message='Passing a BlockManager')
+                a = copy.deepcopy(table)
             table.expand(mismatch='splitsingle')
             a.expand(mismatch='nan')
             related_table, related_years = src.find_related_tables(table.table_type, table.year)
@@ -439,17 +468,19 @@ for i in range(istart, len(datasets)):
                 break
     else:
         csv_filename = src.get_csv_filename(datasets.iloc[i]["Year"], backup_dir, datasets.iloc[i]["TableType"], 
-                    agency=agency, url_contains=datasets.iloc[i]['URL'], id_contains=datasets.iloc[i]['dataset_id'])
+                    agency=agency, url=datasets.iloc[i]['URL'], id=datasets.iloc[i]['dataset_id'])
+        if csv_add_on:
+            csv_filename = csv_filename.replace(".csv","_"+csv_add_on+".csv")
         zip_filename = csv_filename.replace(".csv",".zip")
         load_new = random.random() < perc_update
         if not load_new and load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
             is_zip = not os.path.exists(csv_filename)
             table = src.load_from_csv(datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
-                agency=agency,output_dir=backup_dir, zip=is_zip, url_contains=datasets.iloc[i]['URL'], id_contains=datasets.iloc[i]['dataset_id'])
+                agency=agency,output_dir=backup_dir, zip=is_zip, url=datasets.iloc[i]['URL'], id=datasets.iloc[i]['dataset_id'])
         else:
             try:
                 table = src.load(datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"], 
-                        agency=agency, url_contains=datasets.iloc[i]['URL'], id_contains=datasets.iloc[i]['dataset_id'])
+                        agency=agency, url=datasets.iloc[i]['URL'], id=datasets.iloc[i]['dataset_id'])
             except opd.exceptions.OPD_FutureError:
                 continue
             except:
