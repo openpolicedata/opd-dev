@@ -78,7 +78,7 @@ if run_all_stanford:
 else:
     max_num_stanford = 20
 
-def load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
+def check_load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
     return not force_load_from_url and\
         (os.path.exists(zip_filename) or os.path.exists(csv_filename)) and \
         (not load_if_date_before or \
@@ -399,10 +399,10 @@ for i in range(istart, len(datasets)):
             zip_filename = csv_filename.replace(".csv",".zip")
             
             load_new = random.random() < perc_update if datasets.iloc[i]["TableType"]!='TRAFFIC STOPS' or datasets.iloc[i]["SourceName"]!='St. Paul' else True
-            if not load_new and load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
+            if not load_new and check_load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
                 is_zip = not os.path.exists(csv_filename)
                 try:
-                    table = src.load_from_csv(y, table_type=datasets.iloc[i]["TableType"], 
+                    table = src.load_csv(year=y, table_type=datasets.iloc[i]["TableType"], 
                         agency=agency,output_dir=backup_dir, zip=is_zip, url=datasets.iloc[i]['URL'], 
                         id=datasets.iloc[i]['dataset_id'], 
                         filename=os.path.basename(csv_filename))
@@ -473,9 +473,9 @@ for i in range(istart, len(datasets)):
             csv_filename = csv_filename.replace(".csv","_"+csv_add_on+".csv")
         zip_filename = csv_filename.replace(".csv",".zip")
         load_new = random.random() < perc_update
-        if not load_new and load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
+        if not load_new and check_load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
             is_zip = not os.path.exists(csv_filename)
-            table = src.load_from_csv(datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
+            table = src.load_csv(year=datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
                 agency=agency,output_dir=backup_dir, zip=is_zip, url=datasets.iloc[i]['URL'], id=datasets.iloc[i]['dataset_id'])
         else:
             try:
