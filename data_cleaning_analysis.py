@@ -11,6 +11,7 @@ from glob import glob
 import pandas as pd
 import warnings
 from datetime import datetime
+
 if os.path.basename(os.getcwd()) == "openpolicedata":
     sys.path.append(os.path.join("..","openpolicedata"))
     sys.path.append(os.path.join("..","openpolicedata",'tests'))
@@ -29,7 +30,7 @@ output_dir = os.path.join(output_dir, 'standardization')
 if not os.path.exists(output_dir):
     raise FileNotFoundError(f"Output directory {output_dir} does not exist")
 
-istart = 1325
+istart = 1508
 
 use_changed_rows = False
 csvfile = None
@@ -328,7 +329,9 @@ for i in range(istart, len(datasets)):
     try:
         years = src.get_years(datasets.iloc[i]["TableType"], datasets=datasets.iloc[i])
         years.sort(reverse=True)
-        load_by_year = True
+        load_by_year = years != ['NONE']
+    except (opd.exceptions.OPD_FutureError, opd.exceptions.OPD_MinVersionError):
+        continue
     except (opd.exceptions.OPD_DataUnavailableError, opd.exceptions.OPD_SocrataHTTPError):
         csv_filename = src.get_csv_filename(2023, backup_dir, datasets.iloc[i]["TableType"], 
                     agency=agency)
@@ -337,8 +340,6 @@ for i in range(istart, len(datasets)):
         years = [int(re.findall(r"_(\d+).(csv|zip)", x)[0][0]) for x in all_files]
         years.sort(reverse=True)
         load_by_year = True
-    except opd.exceptions.OPD_FutureError:
-        continue
     except Exception as e:
         if datasets.iloc[i]["DataType"] not in ["CSV", "Excel"]:
             raise
@@ -398,11 +399,12 @@ for i in range(istart, len(datasets)):
                 csv_filename = csv_filename.replace(".csv","_"+csv_add_on+".csv")
             zip_filename = csv_filename.replace(".csv",".zip")
             
-            load_new = random.random() < perc_update if datasets.iloc[i]["TableType"]!='TRAFFIC STOPS' or datasets.iloc[i]["SourceName"]!='St. Paul' else True
+            load_new = random.random() < perc_update if datasets.iloc[i]["TableType"]!=opd.defs.TableType.INCIDENTS or \
+                datasets.iloc[i]["SourceName"]!='Tacoma' else True
             if not load_new and check_load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
                 is_zip = not os.path.exists(csv_filename)
                 try:
-                    table = src.load_csv(year=y, table_type=datasets.iloc[i]["TableType"], 
+                    table = src.load_csv(date=y, table_type=datasets.iloc[i]["TableType"], 
                         agency=agency,output_dir=backup_dir, zip=is_zip, url=datasets.iloc[i]['URL'], 
                         id=datasets.iloc[i]['dataset_id'], 
                         filename=os.path.basename(csv_filename))
@@ -419,7 +421,7 @@ for i in range(istart, len(datasets)):
                 try:
                     table = src.load(datasets.iloc[i]["TableType"], y,
                             agency=agency,  url=datasets.iloc[i]['URL'], id=datasets.iloc[i]['dataset_id'])
-                except (opd.exceptions.OPD_FutureError, opd.exceptions.OPD_DataUnavailableError, opd.exceptions.OPD_SocrataHTTPError):
+                except (opd.exceptions.OPD_FutureError, opd.exceptions.OPD_DataUnavailableError, opd.exceptions.OPD_SocrataHTTPError, opd.exceptions.OPD_MinVersionError):
                     continue
                 except:
                     raise
@@ -440,29 +442,34 @@ for i in range(istart, len(datasets)):
                 a = copy.deepcopy(table)
             table.expand(mismatch='splitsingle')
             a.expand(mismatch='nan')
-            related_table, related_years = src.find_related_tables(table.table_type, table.year)
+            related_table, related_years = src.find_related_tables(table.table_type, table.date)
 
-            for rt, ry in zip(related_table, related_years):
-                try:
-                    related_ds = src.datasets[(src.datasets['TableType']==rt) & (src.datasets['Year']==ry)]
-                    if len(related_ds)==1 and pd.notnull(related_ds.iloc[0]['date_field']) and y!="NONE":
-                        t2 = src.load(rt, y)
-                    else:
-                        t2 = src.load(rt, ry)
-                except (opd.exceptions.OPD_DataUnavailableError, opd.exceptions.OPD_SocrataHTTPError):
-                    continue
-                t2.standardize(race_cats= "expand", agg_race_cat=True, verbose=verbose, no_id="test")
-                try:
-                    # Merge incident and subjects tables on their unique ID columns to create 1 row per subject
-                    table2 = table.merge(t2, std_id=True)
-                except opd.exceptions.AutoMergeError as e:
-                    if any([y in table.table.columns for y in ['tax_id','complaint_id','randomized_officer_id','Latitude','Longitude']]) and \
-                        any([y in t2.table.columns for y in ['tax_id','complaint_id','randomized_officer_id','Latitude','Longitude']]):
+            if (srcName, table.table_type) not in [('Evanston', 'INCIDENTS - INCIDENTS'), ('Evanston', 'INCIDENTS - SUBJECTS')]:
+                for rt, ry in zip(related_table, related_years):
+                    try:
+                        related_ds = src.datasets[(src.datasets['TableType']==rt) & (src.datasets['Year']==ry)]
+                        if len(related_ds)==1 and pd.notnull(related_ds.iloc[0]['date_field']) and y!="NONE":
+                            t2 = src.load(rt, y)
+                        else:
+                            t2 = src.load(rt, ry)
+                    except (opd.exceptions.OPD_DataUnavailableError, opd.exceptions.OPD_SocrataHTTPError, opd.exceptions.OPD_MinVersionError):
                         continue
-                    else:
+                    t2.standardize(race_cats= "expand", agg_race_cat=True, verbose=verbose, no_id="test")
+
+                    if len(t2.table)==0:
+                        continue
+
+                    try:
+                        # Merge incident and subjects tables on their unique ID columns to create 1 row per subject
+                        table2 = table.merge(t2, std_id=True)
+                    except opd.exceptions.AutoMergeError as e:
+                        if any([y in table.table.columns for y in ['tax_id','complaint_id','randomized_officer_id','Latitude','Longitude']]) and \
+                            any([y in t2.table.columns for y in ['tax_id','complaint_id','randomized_officer_id','Latitude','Longitude']]):
+                            continue
+                        else:
+                            raise
+                    except:
                         raise
-                except:
-                    raise
                     
             if not run_all_years:
                 break
@@ -472,16 +479,17 @@ for i in range(istart, len(datasets)):
         if csv_add_on:
             csv_filename = csv_filename.replace(".csv","_"+csv_add_on+".csv")
         zip_filename = csv_filename.replace(".csv",".zip")
-        load_new = random.random() < perc_update
+        load_new = random.random() < perc_update if datasets.iloc[i]["TableType"]!=opd.defs.TableType.TRAFFIC or \
+            datasets.iloc[i]["SourceName"]!='Fort Worth' else True
         if not load_new and check_load_csv(force_load_from_url, load_if_date_before, csv_filename, zip_filename):
             is_zip = not os.path.exists(csv_filename)
-            table = src.load_csv(year=datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
+            table = src.load_csv(date=datasets.iloc[i]["Year"], table_type=datasets.iloc[i]["TableType"], 
                 agency=agency,output_dir=backup_dir, zip=is_zip, url=datasets.iloc[i]['URL'], id=datasets.iloc[i]['dataset_id'])
         else:
             try:
                 table = src.load(datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"], 
                         agency=agency, url=datasets.iloc[i]['URL'], id=datasets.iloc[i]['dataset_id'])
-            except opd.exceptions.OPD_FutureError:
+            except (opd.exceptions.OPD_FutureError, opd.exceptions.OPD_MinVersionError):
                 continue
             except:
                 raise
@@ -496,7 +504,7 @@ for i in range(istart, len(datasets)):
         a = copy.deepcopy(table)
         a.expand(mismatch='nan')
         table.expand(mismatch='splitsingle')
-        related_table, related_years = src.find_related_tables(table.table_type, table.year)
+        related_table, related_years = src.find_related_tables(table.table_type, table.date)
         for rt, ry in zip(related_table, related_years):
             t2 = src.load(rt, ry)
             t2.standardize(race_cats= "expand", agg_race_cat=True, verbose=verbose, no_id="test")

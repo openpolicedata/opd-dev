@@ -18,7 +18,7 @@ def to_pdap(df_opd_red):
     df_opd["state"] = df_opd["State"].apply(lambda x: us_state_to_abbrev[x])
 
     # Rename columns to PDAP
-    df_opd.rename(columns={"readme":"readme_url"}, inplace=True)
+    df_opd = df_opd.rename(columns={"readme":"readme_url"})
     
     # Convert table type from all caps to PDAP format
     df_opd["record_type"] = df_opd["TableType"].apply(lambda x: x.title())

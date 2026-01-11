@@ -1,222 +1,154 @@
-import sys
-import os
-import zipfile
-import numpy as np
+import numbers
 import pandas as pd
-from geopandas.geodataframe import GeoDataFrame
-from shapely import wkt
-
-# Assuming this is either running in the root directory or opd-dev inside the root directory
+import os
+import random
+import sys
+from datetime import datetime
 if os.path.basename(os.getcwd()) == "openpolicedata":
     sys.path.append(os.path.join("..","openpolicedata"))
-    output_dir = os.path.join(".","data","backup")
+    sys.path.append(os.path.join("..","openpolicedata",'tests'))
+    backup_dir = os.path.join(".","data","backup")
 else:
     sys.path.append(os.path.join("..","..","openpolicedata"))
-    output_dir = os.path.join("..","data","backup")
+    sys.path.append(os.path.join("..",'tests'))
+    backup_dir = os.path.join("..","data","backup")
+    
 import openpolicedata as opd
-from datetime import datetime
 
-istart = 510
-update = None #"changes"
-include_stanford = False
-src_file = "..\opd-data\opd_source_table.csv"
+istart = 0
 
-if src_file != None:
-    opd.datasets.datasets = opd.datasets._build(src_file)
+csvfile = None
+csvfile = r"..\opd-data\opd_source_table.csv"
+run_single_year_per_dataset = True
+perc_update = 0.2
 
+if csvfile and not os.path.exists(csvfile):
+    csvfile = os.path.join('..',csvfile)
+if csvfile:
+    assert os.path.exists(csvfile)
+
+if csvfile:
+    opd.datasets.reload(csvfile)
 datasets = opd.datasets.query()
 
-print(f"Output directory: {output_dir}")
-log_filename = f"DataBackup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-log_folder = os.path.join(output_dir,"backup_logs")
-if not os.path.exists(output_dir):
-    os.mkdir(output_dir)
-if not os.path.exists(log_folder):
-    os.mkdir(log_folder)
+def clean(x):
+    if pd.isnull(x):
+        x = ''
+    elif isinstance(x,str):
+        if x.lower()=='false':
+            x = False
+        elif x.lower()=='true':
+            x = True
 
-def log_to_file(*args):
-    filename = os.path.join(log_folder, log_filename)
-    with open(filename, "a") as f:
-        for x in args:
-            if hasattr(x, '__iter__') and type(x) != str:
-                new_line = ', '.join([str(y) for y in x])
-            else:
-                new_line = str(x)
-            
-            now = datetime.now().strftime("%d.%b %Y %H:%M")
-            f.write(f"{now}: {new_line}\n")
+        try:
+            x = float(x)
+        except:
+            pass
+    if isinstance(x, numbers.Number):
+        x = round(x, 6)
+    x = str(x).strip().lstrip('0').rstrip('.0')
+    if x.lower() in ['none','nan']:
+        x = ''
+    return x.lower()
 
-log_to_file("Beginning data backup")
+def comp(df, df1, csv_name):
+    if len(df1) == len(df):
+        if len(df1.columns)>len(df.columns):
+            return
+        elif len(df1.columns)<len(df.columns):
+            raise NotImplementedError()
+        
+        if df.equals(df1) or \
+            ((df==df1) | (df.isnull() & df1.isnull()) | \
+                (df.apply(lambda x: x.apply(clean))==df1.apply(lambda x: x.apply(clean)))).all().all():
+            os.remove(csv_name)
+        else:
+            cols = df.equals(df1) or \
+                ((df==df1) | (df.isnull() & df1.isnull()) | \
+                    (df.apply(lambda x: x.apply(clean))==df1.apply(lambda x: x.apply(clean)))).all()
+            col = cols[~cols].index[0]
+            tf=df[col].apply(clean)!=df1[col].apply(clean)
+            print(df[col][tf].iloc[0])
+            print(df1[col][tf].iloc[0])
+            raise NotImplementedError()
+    elif len(df1)<len(df):
+        assert not ((df.isnull().mean()>0.1) & (df1.isnull().mean()<0.1)).any()
+        os.remove(csv_name)
 
-this_year = datetime.now().year
-
-def check_equality(df, df_new, year, is_sorted):
-    # is_sorted is helpful for debug breakpoints
-    is_equal = True
-    for i in range(len(df_new.columns)):
-        if "location" in df_new.columns[i].lower() or \
-            "latitude" in df_new.columns[i].lower() or \
-            "longitude" in df_new.columns[i].lower() or \
-            df_new.columns[i] in ['data_loaded_at']:  # date_loaded_at can get updated if they reload
-            # Locations can be dicts that can get mangled in CSV conversion
-            continue
-        a = df.iloc[:,i]
-        b = df_new.iloc[:,i]
-        if not a.eq(b).all():
-            if a.dtype == float:
-                if (a-b).abs().max() >= 1e-10:
-                    # For debugging
-                    diffs = [(a.iloc[k],b.iloc[k]) for k in range(len(df)) if a.iloc[k] != b.iloc[k]]
-                    diffs = [x for x in diffs if ((pd.notnull(x[0]) and x[0]!="") or (pd.notnull(x[1]) and x[1]!=""))]
-                    if len(diffs)>0:
-                        is_equal = False
-                        break
-            else:
-                diffs = [(k,a.iloc[k],b.iloc[k]) for k in range(len(df)) if a.iloc[k] != b.iloc[k]]
-                diffs = [x for x in diffs if ((pd.notnull(x[1]) and x[1]!="") or (pd.notnull(x[2]) and x[2]!=""))]
-                if (year in [opd.defs.NA, opd.defs.MULTI] or year >= this_year-1) and len(diffs)>0:
-                    # This could be something that has been completed like a use of force investigation
-                    diffs = [x for x in diffs if (x[1] not in ["NO REPORT"] or x[2] not in ["REPORT"])]
-                if len(diffs)>0:
-                    # Sometimes numbers are loaded as strings from CSV or vise versa. Try comparing strings
-                    diffs = [(k,a.iloc[k],b.iloc[k]) for k in range(len(df)) if str(a.iloc[k]).lower() != str(b.iloc[k]).lower()]
-                    diffs = [x for x in diffs if ((pd.notnull(x[1]) and x[1]!="") or (pd.notnull(x[2]) and x[2]!=""))]
-                if len(diffs)>0:
-                    is_equal = False
-                    break
-
-    return is_equal
-
-def compare_dfs(zipname, table, dataset, year):
-    df = pd.read_csv(zipname).replace("#N/A",np.nan).replace("NA",np.nan).replace("N/A",np.nan).replace("NULL",np.nan).replace("n/a",np.nan)
-    if pd.notnull(dataset["date_field"]):
-        df = df.astype({dataset["date_field"]: 'datetime64[ns]'})
-    df_new = table.table.replace("#N/A",np.nan).replace("NA",np.nan).replace("N/A",np.nan).replace("NULL",np.nan).replace("n/a",np.nan)
-    if type(df_new) == GeoDataFrame:
-        df['geometry'] = df['geometry'].apply(wkt.loads)
-        df = GeoDataFrame(df, crs=df_new.crs)
-        df.pop("geometry")
-        df_new.pop("geometry")
-
-    for col in df_new.columns:
-        if df_new[col].dtype == "object" and df[col].dtype != "object":
-            if df[col].dtype == bool:
-                df_new[col] = df_new[col].map({"False" : False, "True" : True, "false" : False, "true" : True, "FALSE" : False, "TRUE" : True}, na_action="ignore")
-            else:
-                if df[col].dtype==float:
-                    df_new[col] = df_new[col].replace("",np.nan)
-                elif df[col].dtype == np.int64:
-                    df[col] = df[col].astype(pd.Int64Dtype())
-                df_new[col] = df_new[col].astype(df[col].dtype)
-        elif df_new[col].dtype != "object" and df[col].dtype == "object":
-            if df_new[col].dtype==float:
-                df[col] = df[col].replace("",np.nan)
-            df[col] = df[col].astype(df_new[col].dtype)
-
-    df = df[df_new.columns]
-
-    is_equal = df.eq(df_new).all().all()
-    if not is_equal and len(df_new) == len(df):
-        is_equal = check_equality(df, df_new, year, False)
-
-        if not is_equal:
-            # sortby = []
-            # if pd.notnull(dataset["date_field"]) and dataset["date_field"] not in sortby:
-            #     sortby = [dataset["date_field"]]
-            # sortby.extend(df.columns[0:3])
-            df.sort_values(by=list(df.columns), inplace=True, ignore_index=True, key=lambda col: col.apply(lambda x: str(x).lower()))
-            df_new.sort_values(by=list(df.columns), inplace=True, ignore_index=True, key=lambda col: col.apply(lambda x: str(x).lower()))
-            is_equal = check_equality(df, df_new, year, True)
-
-    if is_equal:
-        pass
-    elif len(df_new) == len(df):
-        pass
-    elif (year==opd.defs.NA or year==opd.defs.MULTI or year >= this_year-1) and len(df_new) <= len(df):
-        raise ValueError("Data has gotten shorter for recent data")
-    elif year!=opd.defs.NA and year!=opd.defs.MULTI and year < this_year-1:
-        raise("Older data has changed")
-
-    return is_equal
-
+remove_old = True
 for i in range(istart, len(datasets)):
-    if not include_stanford and "stanford" in datasets.iloc[i]["URL"]:
+    if datasets.iloc[i]["TableType"].lower() in ['calls for service', 'incidents', 'crashes']:
         continue
+
+    if random.random()>perc_update:
+        continue
+
     srcName = datasets.iloc[i]["SourceName"]
     state = datasets.iloc[i]["State"]
 
-    table_print = datasets.iloc[i]["TableType"]
+    agency = None
+
     now = datetime.now().strftime("%d.%b %Y %H:%M:%S")
-    print(f"{now} Saving CSV for dataset {i} of {len(datasets)}: {srcName} {table_print} table")
+    print(f"{now} Running index {i} of {len(datasets)}: {srcName} {datasets.iloc[i]['TableType']} table")
 
-    src = opd.Source(srcName, state=state)
+    src = opd.Source(srcName, state=state, agency=datasets.iloc[i]["Agency"])
 
-    if datasets.iloc[i]["DataType"] in [opd.defs.DataType.CSV.value, opd.defs.DataType.EXCEL.value] or \
-        datasets.iloc[i]["Year"] != opd.defs.MULTI:
-        csv_filename = src.get_csv_filename(datasets.iloc[i]["Year"], output_dir, datasets.iloc[i]["TableType"])
-        zipname = csv_filename.replace(".csv",".zip")
-
-        update_data = False
-        if os.path.exists(zipname):
-            if update == "changes":
-                update_data = True
-            else:
-                continue
-
+    if datasets.iloc[i]['Year']==opd.defs.MULTI and datasets.iloc[i]["DataType"] not in ['CSV','Excel']:
         try:
-            table = src.load(datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"])
-        except Exception as e:
-            log_to_file(srcName, datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"], e.args)
+            years = src.get_years(datasets.iloc[i]["TableType"], datasets=datasets.iloc[i])
+            years.sort(reverse=True)
+            load_by_year = True
+        except (opd.exceptions.OPD_DataUnavailableError, opd.exceptions.OPD_SocrataHTTPError):
+            a = 1
+        except opd.exceptions.OPD_FutureError:
             continue
-
-        if update_data and compare_dfs(zipname, table, datasets.iloc[i], datasets.iloc[i]["Year"]):
-            continue
-            
-        csv_filename = table.to_csv(output_dir)
-        zipname = csv_filename.replace(".csv",".zip")
-        with zipfile.ZipFile(zipname, mode="w", compression=zipfile.ZIP_LZMA) as archive:
-            archive.write(csv_filename)
-        if not os.path.exists(zipname):
-            raise FileExistsError(zipname)
-        os.remove(csv_filename)
     else:
-        try:
-            years = src.get_years(datasets.iloc[i]["TableType"])
-        except Exception as e:
-            log_to_file(srcName, datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"], e.args)
-            continue
+        years = [datasets.iloc[i]['Year']]
 
-        now = datetime.now().strftime("%d.%b %Y %H:%M:%S")
-        print(f"\t{now} Years: {years}")
+    for y in years:
+        outfile = src.get_parquet_filename(y, backup_dir, datasets.iloc[i]["TableType"], 
+                    agency=agency, url=datasets.iloc[i]['URL'], id=datasets.iloc[i]['dataset_id'])
         
-        for year in years:
-            csv_filename = src.get_csv_filename(year, output_dir, datasets.iloc[i]["TableType"])
+        csv_name = src.get_csv_filename(y, backup_dir, datasets.iloc[i]["TableType"], 
+                        agency=agency, url=datasets.iloc[i]['URL'], id=datasets.iloc[i]['dataset_id'])
+        zip_name = csv_name.replace('.csv', '.zip')
 
-            zipname = csv_filename.replace(".csv",".zip")
-            update_data = False
-            if os.path.exists(zipname):
-                if update == "changes":
-                    update_data = True
-                else:
-                    continue
+        check_old = remove_old and (os.path.exists(csv_name) or os.path.exists(zip_name))
 
-            print(f"\t{now} Year: {year}")
-
+        outfile = outfile.replace('.parquet','.geoparquet') if os.path.exists(outfile.replace('.parquet','.geoparquet')) else outfile
+        
+        if os.path.exists(outfile):
+            df = src.load_parquet(y, table_type=datasets.iloc[i]["TableType"], filename=outfile, 
+                                 agency=agency,  url=datasets.iloc[i]['URL'], id=datasets.iloc[i]['dataset_id']).table
+        else:
+            table = src.load(datasets.iloc[i]["TableType"], y,
+                    agency=agency,  url=datasets.iloc[i]['URL'], id=datasets.iloc[i]['dataset_id'])
+            
             try:
-                table = src.load(datasets.iloc[i]["TableType"], year)
-            except Exception as e:
-                log_to_file(srcName, datasets.iloc[i]["TableType"], datasets.iloc[i]["Year"], year, e.args)
-                continue
-
-            if update_data and compare_dfs(zipname, table, datasets.iloc[i], year):
-                continue
+                outfile = table.to_parquet(output_dir=backup_dir, mixed=True)
+                if check_old:
+                    df = src.load_parquet(y, table_type=datasets.iloc[i]["TableType"], filename=outfile, 
+                                    agency=agency,  url=datasets.iloc[i]['URL'], id=datasets.iloc[i]['dataset_id']).table
+            except TypeError as e:
+                outfile = outfile.replace('.parquet', '_unicode_error.csv')
+                table.to_csv(filename=outfile)
+                if check_old:
+                    df = src.load_csv(date=y, table_type=datasets.iloc[i]["TableType"], filename=outfile, 
+                                    agency=agency,  url=datasets.iloc[i]['URL'], id=datasets.iloc[i]['dataset_id']).table
                 
-            csv_filename = table.to_csv(output_dir)
-            zipname = csv_filename.replace(".csv",".zip")
-            with zipfile.ZipFile(zipname, mode="w", compression=zipfile.ZIP_LZMA) as archive:
-                archive.write(csv_filename)
-            if not os.path.exists(zipname):
-                raise FileExistsError(zipname)
-            os.remove(csv_filename)
-
-log_to_file("Completed data backup")
+        if check_old:
+            if os.path.exists(csv_name):
+                df1 = pd.read_csv(csv_name)
+                comp(df, df1, csv_name)
+                
+            if os.path.exists(zip_name):
+                df2 = pd.read_csv(zip_name)
+                comp(df, df2, zip_name)
+                
+                if os.path.exists(csv_name):
+                    raise NotImplementedError()
+        
+        if run_single_year_per_dataset:
+            break
+            
+print('Backup complete')     
